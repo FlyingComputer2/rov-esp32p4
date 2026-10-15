@@ -28,4 +28,4 @@ set(EXTRA_COMPONENT_DIRS
     ${winject_l3_SOURCE_DIR}/idf/winject_l3
     ${WINJECT_SDIO_PROXY_COMPONENT_DIRS})
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(rover-remote-esp32-p4)
+project(rover-remote-esp32p4)

@@ -1,4 +1,4 @@
-# rover-remote-esp32-p4
+# rover-remote-esp32p4
 
 Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP32-C6 on SDIO as the radio). One image runs:
 
@@ -24,7 +24,7 @@ Native ESP-IDF v5.5 (`. ~/esp/esp-idf-v5.5.5/export.sh`); P4 USB-UART on the Typ
 idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 ```
 
-`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over HTTP (`curl --data-binary @build/rover-remote-esp32-p4.bin http://<P4 IP>/update/p4`); the config partition is not touched by that.
+`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over HTTP (`curl --data-binary @build/rover-remote-esp32p4.bin http://<P4 IP>/update/p4`); the config partition is not touched by that.
 
 Console lines: `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops; winject-l3 logs its own stats every `winject.stats_sec`.
 
