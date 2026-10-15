@@ -14,7 +14,7 @@ FetchContent_Declare(winject_l3
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
-    GIT_TAG 74a2442b133cd5daafaae2f59a7e8f162f43d8ee
+    GIT_TAG cf4afeb760ba2ac0ce9b75addd5ecac068e74d11
 )
 foreach(dep winject_l3 winject_sdio_proxy)
     FetchContent_GetProperties(${dep})
