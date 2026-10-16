@@ -10,7 +10,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG 82c338152326040dcd381083c947cb3417b53e2d
+    GIT_TAG c8e97486b82f72b6d818833d676477b01d83181c
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
