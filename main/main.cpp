@@ -1,12 +1,16 @@
 // Rover remote on the Waveshare ESP32-P4-WIFI6-DEV-KIT: Ethernet (IP101,
 // DHCP), the winject SDIO proxy (C6 radio on UDP 22 / 9000) and winject-l3
-// using that radio over loopback, with its config on SPIFFS.
+// using that radio over loopback, with its config on SPIFFS. vstreamer is
+// linked in; no pipeline runs yet.
 
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 
 #include "WinjectL3.h"
+#include "core/component_coder.hpp"
+#include "core/component_factory.hpp"
+#include "core/component_sink.hpp"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -125,6 +129,16 @@ void print_stats()
     fflush(stdout);
 }
 
+/* The rover's video components are in the build (camera pipeline comes later). */
+void print_vstreamer()
+{
+    using vstreamer::component_factory;
+    const bool enc = component_factory::create_coder("h264_encoder") != nullptr;
+    const bool tx = component_factory::create_sink("stream_sender") != nullptr;
+    printf("ROVER_VSTREAMER h264_encoder=%d stream_sender=%d\n", enc, tx);
+    fflush(stdout);
+}
+
 }  // namespace
 
 extern "C" void app_main(void)
@@ -160,6 +174,7 @@ extern "C" void app_main(void)
     {
         start_l3();
     }
+    print_vstreamer();
     printf("ROVER_READY\n");
     fflush(stdout);
 

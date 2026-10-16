@@ -4,16 +4,18 @@ Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP3
 
 - **winject SDIO proxy** ([winject-radio-esp32-sdio-proxy](https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy)): drives the C6 ([winject-radio-esp32c6](https://github.com/winject-wireless/winject-radio-esp32c6)) and exposes it as a winject radio on UDP 22 (m-plane) and 9000 (d-plane), plus HTTP firmware update.
 - **winject-l3** ([winject-l3](https://github.com/winject-wireless/winject-l3), `idf/winject_l3`): winject-manager on a pthread, using that radio over loopback (`winject.device = 127.0.0.1`).
+- **vstreamer** ([vstreamer](https://github.com/FlyingComputer2/vstreamer), `idf/vstreamer`): the video pipeline components (P4 hardware H.264 encoder, `stream_sender`, …). Linked in, but no pipeline runs yet; startup prints which components the build has.
 
 ```
  rover apps ──UDP (Ethernet)──▶ winject-l3 ──loopback UDP 22 / 9000──▶ winject_proxy ──SDIO──▶ C6 ─▶ air
 ```
 
-Both come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). To build against local checkouts:
+All three come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). vstreamer and winject-l3 both fetch bfc and ISA-L under the same FetchContent names, and the first declaration wins, so bump their pins together. To build against local checkouts:
 
 ```bash
 idf.py -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=~/development/winject-l3 \
-       -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY=~/development/winject-radio-esp32-sdio-proxy build
+       -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY=~/development/winject-radio-esp32-sdio-proxy \
+       -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=~/development/vstreamer build
 ```
 
 ## Build and flash
@@ -26,7 +28,7 @@ idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 
 `idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over HTTP (`curl --data-binary @build/rover-remote-esp32p4.bin http://<P4 IP>/update/p4`); the config partition is not touched by that.
 
-Console lines: `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops; winject-l3 logs its own stats every `winject.stats_sec`.
+Console lines: `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_VSTREAMER h264_encoder=1 stream_sender=1`, `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops; winject-l3 logs its own stats every `winject.stats_sec`.
 
 ## Config
 
@@ -36,4 +38,4 @@ Console lines: `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`,
 
 Builds; not run on hardware yet. Open points:
 - TX pacing on the P4: winject-l3's reactor and TX thread wait in FreeRTOS ticks (1 ms), coarser than on Linux.
-- vstreamer is not ported yet.
+- vstreamer: no camera → H.264 → `stream_sender` pipeline yet (waits on the CSI camera source in vstreamer).

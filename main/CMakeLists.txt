@@ -1,5 +1,5 @@
 idf_component_register(SRCS "main.cpp"
-                       PRIV_REQUIRES winject_l3 winject_proxy esp_eth esp_netif esp_event
+                       PRIV_REQUIRES winject_l3 winject_proxy vstreamer esp_eth esp_netif esp_event
                                      nvs_flash spiffs pthread)
 # /winject/winject.conf: the SPIFFS image is built from config/ and flashed
 # with the app (idf.py flash).
