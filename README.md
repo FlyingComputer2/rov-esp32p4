@@ -38,4 +38,4 @@ Console lines: `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_VSTREAM
 
 Builds; not run on hardware yet. Open points:
 - TX pacing on the P4: winject-l3's reactor and TX thread wait in FreeRTOS ticks (1 ms), coarser than on Linux.
-- vstreamer: no camera → H.264 → `stream_sender` pipeline yet (waits on the CSI camera source in vstreamer).
+- vstreamer: no camera → H.264 → `stream_sender` pipeline yet (the CSI camera and fused ISP+H.264 sources are available in the pinned vstreamer).
