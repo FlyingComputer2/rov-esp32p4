@@ -47,12 +47,12 @@ The video settings (bitrate, FEC 21/31, `fec_spread_ms` 75, `max_datagram` 1445 
 
 ## Status
 
-Video runs end to end over the air on the bench (P4 + C6 → GS RTL8812AU, a few metres): about 7% frame loss on the air at OFDM_24M / 15 dBm, and with FEC 21/31 at 75 ms spread 0–0.7% residual RTP loss at 22–27 fps at the GS receiver. Core 0 stays ~25–30% idle and internal RAM above ~56 KB. Measured along the way:
+Video runs end to end over the air on the bench (P4 + C6 → GS RTL8812AU, a few metres). Core 0 stays ~25–30% idle and internal RAM above ~56 KB. Measured along the way:
 - At 2 dBm (the GS's bench power for the RTL8812AU) nothing from the C6 arrives; it is heard from about 5 dBm.
-- OFDM_36M loses ~11% on the air, 24M and 18M ~7%.
-- FEC 10/12 left 3.8% residual (3.6 fps); 15/31 runs core 0 out of time beside the proxy and winject-l3.
+- Air loss depends on the channel, not on rate, power above ~10 dBm, or the GS receiver gain (RX IGI pinned at 0x3c; 0x30–0x54 all the same): losses are single frames, and each receiver has its own bad channels. C6 → GS: ~0.3–1.9% on channels 1–4, 6.5–9% on 5–13; GS → C6: ~5% on 3–4, ≤0.7% on 1, 2 and 13. Channel 1 is clean both ways (~1%).
+- On channel 13 (this config, paired with the GS), FEC 21/31 at 75 ms spread gives 0–0.7% residual RTP loss at 22–27 fps; 10/12 left 3.8% (3.6 fps); 15/31 runs core 0 out of time beside the proxy and winject-l3. On channel 1 every FEC tried (10/12 to 21/31) was clean at 27–28 fps.
 
 Open points:
-- The ~7% air loss floor does not improve at lower rates, so it is likely not SNR: GS receiver gain or bursts, not investigated.
+- Channel: 13 matches the GS (rover-ground) but loses ~7% on the air; 1 or 2 would be clean both ways. Moving needs both configs. The cause of the per-channel loss (local in-band interference or desense at each receiver) is not known.
 - TX pacing on the P4: winject-l3's reactor and TX thread wait in FreeRTOS ticks (1 ms), coarser than on Linux.
 - Reverse telemetry (receiver → `stream_sender`, for adaptive FEC) is off.

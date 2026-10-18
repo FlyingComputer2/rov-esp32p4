@@ -36,10 +36,12 @@ constexpr size_t k_l3_stack_bytes = 16 * 1024;
 /* Video into winject-l3's upstream 1 (config/winject.conf: UDP server on
  * 22081, no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
  * protects the stream end to end; datagrams must stay within winject-l3's
- * 1445-byte application limit. Bench over the air (C6 -> RTL8812AU, ~7%
- * bursty frame loss): 6 Mbit/s with FEC 21/31 and 75 ms spread gave 0-0.4%
- * residual loss at 24.5-27 fps; 10/12 left 3.8% (3.6 fps) and 15/31 ran
- * core 0 out of time. Tunable at run time on the vstreamer m-plane (UDP 5090). */
+ * 1445-byte application limit. Bench over the air (C6 -> RTL8812AU): on
+ * channel 13 (~7% isolated frame loss) 6 Mbit/s with FEC 21/31 and 75 ms
+ * spread gave 0-0.7% residual loss at 22-27 fps, 10/12 left 3.8% (3.6 fps)
+ * and 15/31 ran core 0 out of time; on channel 1 (~1% loss) every FEC tried
+ * was clean. Bitrate (src bitrate), FEC and spread can be changed at run time
+ * on the vstreamer m-plane (UDP 5090). */
 constexpr const char* k_video_peer = "127.0.0.1:22081";
 constexpr int k_video_mplane_port = 5090;
 
