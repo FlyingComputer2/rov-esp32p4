@@ -2,7 +2,7 @@ CONFIG_IDF_TARGET="esp32p4"
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_SPEED_250M=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_CONSOLE_UART_CUSTOM=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
@@ -13,8 +13,9 @@ CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_SO_RCVBUF=y
 # Proxy (UDP 22, 9000, HTTP server) + winject-l3 (radio console and d-plane,
-# manager console, upstreams, 2 for its reactor's wake pipe).
-CONFIG_LWIP_MAX_SOCKETS=24
+# manager console, 3 upstreams, 2 for its reactor's wake pipe) + vstreamer live
+# TX (stream_sender, management plane).
+CONFIG_LWIP_MAX_SOCKETS=28
 
 # Two app slots for POST /update/p4 with rollback (as the proxy's app), plus
 # a SPIFFS partition holding /winject/winject.conf.
@@ -22,3 +23,26 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# vstreamer live TX (same settings as vstreamer's idf/example).
+# MIPI-CSI camera: OV5647 at 1080p30 RAW10, ISP with AE/AWB. The encoder is
+# esp_h264 directly, so esp_video's own H.264 device stays off.
+CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE=n
+CONFIG_CAMERA_OV5647=y
+CONFIG_CAMERA_OV5647_MIPI_RAW10_1920X1080_30FPS=y
+CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW10_1920X1080_30FPS=y
+# 1080p30 needs both cores at full speed (esp_h264 HW ~33 ms/frame).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+# Each AU leaves as a burst of datagrams; the default EMAC TX ring overflows.
+CONFIG_ETH_DMA_BUFFER_SIZE=1600
+CONFIG_ETH_DMA_TX_BUFFER_NUM=30
+# Per-task CPU and heap headroom ("get sys stats" on the live TX m-plane).
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+# lwIP pbufs in PSRAM: at video rate in internal RAM an IDR burst took
+# internal free down to ~300 B, which winject-l3 and the proxy cannot afford.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024

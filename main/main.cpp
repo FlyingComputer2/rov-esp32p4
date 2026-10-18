@@ -1,16 +1,17 @@
 // Rover remote on the Waveshare ESP32-P4-WIFI6-DEV-KIT: Ethernet (IP101,
-// DHCP), the winject SDIO proxy (C6 radio on UDP 22 / 9000) and winject-l3
-// using that radio over loopback, with its config on SPIFFS. vstreamer is
-// linked in; no pipeline runs yet.
+// DHCP), the winject SDIO proxy (C6 radio on UDP 22 / 9000), winject-l3
+// using that radio over loopback with its config on SPIFFS, and vstreamer
+// live TX (MIPI-CSI camera -> hardware H.264 -> RTP -> stream_sender) into
+// winject-l3's video upstream (1) on loopback.
 
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 
+#include <thread>
+
 #include "WinjectL3.h"
-#include "core/component_coder.hpp"
-#include "core/component_factory.hpp"
-#include "core/component_sink.hpp"
+#include "core/thread_spawn.hpp"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -19,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "vstreamer_idf/live_tx.hpp"
 #include "winject_proxy.h"
 
 namespace
@@ -30,6 +32,16 @@ constexpr int k_eth_phy_addr = 1;
 constexpr int k_eth_phy_reset_gpio = 51;
 constexpr const char* k_config_path = "/winject/winject.conf";
 constexpr size_t k_l3_stack_bytes = 16 * 1024;
+
+/* Video into winject-l3's upstream 1 (config/winject.conf: UDP server on
+ * 22081, no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
+ * protects the stream end to end; datagrams must stay within winject-l3's
+ * 1445-byte application limit. Bench over the air (C6 -> RTL8812AU, ~7%
+ * bursty frame loss): 6 Mbit/s with FEC 21/31 and 75 ms spread gave 0-0.4%
+ * residual loss at 24.5-27 fps; 10/12 left 3.8% (3.6 fps) and 15/31 ran
+ * core 0 out of time. Tunable at run time on the vstreamer m-plane (UDP 5090). */
+constexpr const char* k_video_peer = "127.0.0.1:22081";
+constexpr int k_video_mplane_port = 5090;
 
 void on_got_ip(void*, esp_event_base_t, int32_t, void* data)
 {
@@ -129,14 +141,37 @@ void print_stats()
     fflush(stdout);
 }
 
-/* The rover's video components are in the build (camera pipeline comes later). */
-void print_vstreamer()
+vstreamer::idf::live_tx_config video_config()
 {
-    using vstreamer::component_factory;
-    const bool enc = component_factory::create_coder("h264_encoder") != nullptr;
-    const bool tx = component_factory::create_sink("stream_sender") != nullptr;
-    printf("ROVER_VSTREAMER h264_encoder=%d stream_sender=%d\n", enc, tx);
-    fflush(stdout);
+    vstreamer::idf::live_tx_config cfg;
+    cfg.peer = k_video_peer;
+    cfg.mplane_port = k_video_mplane_port;
+    cfg.src = {{"buffers", "6"}, {"fps", "30"},    {"bitrate", "6000000"},
+               {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
+    /* In order: fec_n before fec_k, since k may not exceed the current n. */
+    cfg.snd = {{"mtu", "1400"},      {"max_datagram", "1445"}, {"max_kbps", "0"},
+               {"telemetry", "off"}, {"fec", "block"},         {"fec_n", "31"},
+               {"fec_k", "21"},      {"fec_spread_ms", "75"}};
+    return cfg;
+}
+
+void run_video()
+{
+    const vstreamer::idf::live_tx_config cfg = video_config();
+    for (;;)
+    {
+        const int rc = vstreamer::idf::run_live_tx(cfg);
+        printf("ROVER_VIDEO_EXIT rc=%d, restarting in 3 s\n", rc);
+        fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+}
+
+/* vstreamer pipeline control needs a pthread, not app_main; run_live_tx blocks. */
+void start_video()
+{
+    vstreamer::spawn_thread(vstreamer::thread_opts {"rover_video", 12 * 1024}, run_video)
+        .detach();
 }
 
 }  // namespace
@@ -174,7 +209,7 @@ extern "C" void app_main(void)
     {
         start_l3();
     }
-    print_vstreamer();
+    start_video();
     printf("ROVER_READY\n");
     fflush(stdout);
 
