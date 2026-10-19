@@ -23,7 +23,7 @@ FetchContent_Declare(winject_sdio_proxy
 # is declared first wins, so keep their pins equal.
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG f5db45e5ffb3527fe514a91cff884f92ba1ef74e
+    GIT_TAG 80ea4cde164bc1de38e0ac0f79533a96885f0197
 )
 foreach(dep winject_l3 winject_sdio_proxy vstreamer)
     FetchContent_GetProperties(${dep})
