@@ -36,9 +36,6 @@ CONFIG_CAMERA_OV5647_MIPI_RAW10_1920X1080_30FPS=y
 CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW10_1920X1080_30FPS=y
 # 1080p30 needs both cores at full speed (esp_h264 HW ~33 ms/frame).
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
-# Each AU leaves as a burst of datagrams; the default EMAC TX ring overflows.
-CONFIG_ETH_DMA_BUFFER_SIZE=1600
-CONFIG_ETH_DMA_TX_BUFFER_NUM=30
 # Per-task CPU and heap headroom ("get sys stats" on the live TX m-plane).
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
