@@ -2,18 +2,20 @@
 
 Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP32-C6 on SDIO as the radio). One image runs:
 
-- **winject SDIO proxy** ([winject-radio-esp32-sdio-proxy](https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy)): drives the C6 ([winject-radio-esp32c6](https://github.com/winject-wireless/winject-radio-esp32c6)) and exposes it as a winject radio on UDP 22 (m-plane) and 9000 (d-plane), plus HTTP firmware update.
-- **winject-l3** ([winject-l3](https://github.com/winject-wireless/winject-l3), `idf/winject_l3`): winject-manager on a pthread, using that radio over loopback (`winject.device = 127.0.0.1`).
-- **vstreamer** ([vstreamer](https://github.com/FlyingComputer2/vstreamer), `idf/vstreamer`): live TX (`vstreamer::idf::run_live_tx`): OV5647 MIPI-CSI camera → ISP + hardware H.264 (1080p30, 6 Mbit/s) → RTP → `stream_sender` with RS FEC 21/31, into winject-l3's video upstream on loopback.
+- **winject SDIO proxy** ([winject-radio-esp32-sdio-proxy](https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy)): drives the C6 ([winject-radio-esp32c6](https://github.com/winject-wireless/winject-radio-esp32c6)) and exposes it as a winject radio: m-plane on UDP 22, d-plane on in-process queues, plus HTTP firmware update.
+- **winject-l3** ([winject-l3](https://github.com/winject-wireless/winject-l3), `idf/winject_l3`): winject-manager on a pthread, using that radio (`radio.mplane = 127.0.0.1:22`, `radio.dplane_tx/_rx` queues).
+- **vstreamer** ([vstreamer](https://github.com/FlyingComputer2/vstreamer), `idf/vstreamer`): live TX (`vstreamer::idf::run_live_tx`): OV5647 MIPI-CSI camera → ISP + hardware H.264 (1080p30, 6 Mbit/s) → RTP → `stream_sender` with RS FEC 21/31, into winject-l3's video upstream over queues.
 
 ```
- camera ─▶ vstreamer live TX ──loopback UDP 22081──▶ winject-l3 ──loopback UDP 22 / 9000──▶ winject_proxy ──SDIO──▶ C6 ─▶ air
- rover apps ──UDP (Ethernet)──┘
+ camera ─▶ vstreamer live TX ──video_tx / video_rx──▶ winject-l3 ──wifi_tx / wifi_rx──▶ winject_proxy ──SDIO──▶ C6 ─▶ air
+                                                       └──── loopback UDP 22 (m-plane) ────┘
 ```
+
+`main/main.cpp` registers the four queues (`bfc::cv_reactor_circular_lossy_queue_registry`) and one `bfc::cv_reactor` (`rover_dp`, its own thread) before starting the three, and keeps them for the life of the program. The proxy, winject-l3 (`radio.dplane_tx` / `radio.dplane_rx` / `radio.reactor`, upstream 1 `QUEUE_FORWARDING`) and vstreamer (`live_tx_config.queue_*`) bind them by name. A full queue drops its oldest datagram: the proxy counts it as `dup_evict`, winject-l3 in its metrics, vstreamer in `snd` stats.
 
 The GS side is [rover-ground](https://github.com/FlyingComputer2/rover-ground) (winject-l3 + winject-radio-realtek on an RTL8812AU, `sdl_stream_receiver` on `127.0.0.1:21082`); the two `winject.conf`s pair up by domain, channel and upstream ids.
 
-All three come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). vstreamer and winject-l3 both fetch bfc and ISA-L under the same FetchContent names, and the first declaration wins, so bump their pins together. To build against local checkouts:
+All three come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). All three fetch bfc under one FetchContent name and must use the same bfc (they share its registries); the top-level `CMakeLists.txt` declares it first, so it wins, and its pin should stay equal to theirs. vstreamer and winject-l3 also share ISA-L, so bump their pins together. To build against local checkouts:
 
 ```bash
 idf.py -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=~/development/winject-l3 \
@@ -35,15 +37,15 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 
 ## Config
 
-[`config/winject.conf`](config/winject.conf): radio on loopback (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and the GS's three upstreams with buses swapped:
+[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and the GS's three upstreams with buses swapped:
 
-| id | Stream | Rover bind | Manager FEC |
-|----|--------|------------|-------------|
-| 0 | WireGuard (nothing feeds it on the P4 yet) | `127.0.0.1:22180` | RS 1/3 |
-| 1 | Video (vstreamer live TX on the P4, or apps on the rover's Ethernet) | `127.0.0.1:22081` | none: vstreamer's own RS FEC runs end to end |
-| 2 | Radio link-test probe | `127.0.0.1:22100` | none |
+| id | Stream | Rover endpoint | Manager FEC |
+|----|--------|----------------|-------------|
+| 0 | WireGuard (nothing feeds it on the P4 yet) | UDP `127.0.0.1:22180` | RS 1/3 |
+| 1 | Video (vstreamer live TX on the P4 only) | queues `video_tx` (in) / `video_rx` (out) | none: vstreamer's own RS FEC runs end to end |
+| 2 | Radio link-test probe | UDP `127.0.0.1:22100` | none |
 
-The video settings (bitrate, FEC 21/31, `fec_spread_ms` 75, `max_datagram` 1445 for winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed at run time on the vstreamer m-plane, UDP 5090 (`get/set src|pay|snd <key>`, `get sys stats`). The manager console and the vstreamer m-plane have no authentication; they are bound to all interfaces because the rover's Ethernet is an internal link.
+The video settings (bitrate, FEC 21/31, `fec_spread_ms` 75; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed at run time on the vstreamer m-plane, UDP 5090 (`get/set src|pay|snd <key>`, `get sys stats`). The manager console and the vstreamer m-plane have no authentication; they are bound to all interfaces because the rover's Ethernet is an internal link.
 
 ## Status
 

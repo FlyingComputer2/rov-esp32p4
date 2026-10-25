@@ -1,7 +1,6 @@
-# Rover remote on the ESP32-P4: the winject SDIO proxy (C6 radio on UDP
-# 22 / 9000), winject-l3 (winject-manager) talking to it over loopback, and
-# vstreamer live TX (camera -> H.264 -> stream_sender) into winject-l3's
-# upstream on loopback.
+# Rover remote on the ESP32-P4: the winject SDIO proxy (C6 radio), winject-l3
+# (winject-manager) and vstreamer live TX (camera -> H.264 -> stream_sender),
+# joined by in-process bfc queues (main/main.cpp).
 # Local checkouts: -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=<dir>,
 # -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY=<dir>,
 # -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=<dir>.
@@ -11,19 +10,26 @@ if(NOT DEFINED PROJECT_VER)
 endif()
 
 include(FetchContent)
+# The three share bfc's queue and reactor registries, so they must build
+# against one bfc: FetchContent keeps the first declaration, and this one
+# comes before theirs. Keep it equal to their pins.
+FetchContent_Declare(bfc
+    GIT_REPOSITORY https://github.com/therooftopprinz/BFC.git
+    GIT_TAG 6c02a495d1a2cf4a8a13dfa6b25b342780527c89
+)
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG 3fe88330715ded8aab5d6cd57768f6c0877bd716
+    GIT_TAG fb3eea11d3edc81ce39287a8fd5c77e3d43d41f1
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
-    GIT_TAG fc379f01cf4925eec53f5912a283c6751ff35e9f
+    GIT_TAG ad4a1672424b726b4d9b8596180a3ed02e04b330
 )
-# vstreamer and winject-l3 share the bfc and isa-l FetchContent names; whichever
+# vstreamer and winject-l3 also share the isa-l FetchContent name; whichever
 # is declared first wins, so keep their pins equal.
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 80ea4cde164bc1de38e0ac0f79533a96885f0197
+    GIT_TAG 18955a481797f1eee26aa8beda870b32c1c45cdb
 )
 foreach(dep winject_l3 winject_sdio_proxy vstreamer)
     FetchContent_GetProperties(${dep})
