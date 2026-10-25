@@ -19,7 +19,7 @@ FetchContent_Declare(bfc
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG 8c1ada1b2ca55a35226b0d89b7bbcf5742e99fa3
+    GIT_TAG 53572c956b284e9fe3ac4ba19dd53d11a16c05f0
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
