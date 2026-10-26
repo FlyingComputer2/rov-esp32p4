@@ -61,9 +61,11 @@ constexpr size_t k_video_tx_capacity = 256;
 constexpr size_t k_video_rx_capacity = 16;
 
 /* Runs winject-l3's radio RX demux and upstream 1, and wakes the proxy's
- * d-plane task (which does the blocking SDIO writes). Not pinned: it is light
- * next to the encoder and FEC, but must not wait behind them. */
-constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, -1, 14};
+ * d-plane task (which does the blocking SDIO writes). Pinned to core 1: left
+ * unpinned it is woken by vs_send (core 1, same priority) and so preempts
+ * vs_isp_tx (core 0, priority 13) instead of taking core 1's idle time, and
+ * core 0 ran out of time above ~8 Mbit/s. */
+constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 14};
 
 /* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING,
  * no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
