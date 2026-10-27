@@ -13,7 +13,7 @@ Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP3
 
 `main/main.cpp` registers the four queues (`bfc::cv_reactor_circular_lossy_queue_registry`) and one `bfc::cv_reactor` (`rover_dp`, its own thread) before starting the three, and keeps them for the life of the program. The proxy, winject-l3 (`radio.dplane_tx` / `radio.dplane_rx` / `radio.reactor`, upstream 1 `QUEUE_FORWARDING`) and vstreamer (`live_tx_config.queue_*`) bind them by name. A full queue drops its oldest datagram: the proxy counts it as `dup_evict`, winject-l3 in its metrics, vstreamer in `snd` stats.
 
-The GS side is [rover-ground](https://github.com/FlyingComputer2/rover-ground) (winject-l3 + winject-radio-realtek on an RTL8812AU, `sdl_stream_receiver` on `127.0.0.1:21082`); the two `winject.conf`s pair up by domain, channel and upstream ids.
+The GS side is [rover-ground-esp32p4](https://github.com/FlyingComputer2/rover-ground-esp32p4): winject-l3, the SDIO proxy and the video receiver on a Guition P4 + C6. Its L3 config is built in (`l3_main()` in its `main/main.cpp`) and pairs with [`config/winject.conf`](config/winject.conf) by domain, channel and upstream id, with buses swapped. It carries only upstream 1 (video). The earlier GS, [rover-ground](https://github.com/FlyingComputer2/rover-ground) (winject-l3 + RTL8812AU on the opi5), is archived.
 
 All three come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). All three fetch bfc under one FetchContent name and must use the same bfc (they share its registries); the top-level `CMakeLists.txt` declares it first, so it wins, and its pin should stay equal to theirs. vstreamer and winject-l3 also share ISA-L, so bump their pins together. To build against local checkouts:
 
@@ -37,7 +37,7 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 
 ## Config
 
-[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and the GS's three upstreams with buses swapped:
+[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and three upstreams. The ground P4 pairs only upstream 1 (buses swapped); 0 and 2 have no peer there yet:
 
 | id | Stream | Rover endpoint | Manager FEC |
 |----|--------|----------------|-------------|
@@ -55,6 +55,6 @@ Video runs end to end over the air on the bench (P4 + C6 → GS RTL8812AU, a few
 - On channel 13 (the earlier pairing with the GS), FEC 21/31 at 75 ms spread gives 0–0.7% residual RTP loss at 22–27 fps; 10/12 left 3.8% (3.6 fps); 15/31 runs core 0 out of time beside the proxy and winject-l3. On channel 1 every FEC tried (10/12 to 21/31) was clean at 27–28 fps.
 
 Open points:
-- Channel 1 needs the GS (rover-ground) on channel 1 too. The cause of the per-channel loss (local in-band interference or desense at each receiver) is not known; channel 1 may not be the clean one elsewhere.
+- Channel 1 needs the GS on channel 1 too (the ground P4 is). The cause of the per-channel loss (local in-band interference or desense at each receiver) is not known; channel 1 may not be the clean one elsewhere.
 - TX pacing on the P4: winject-l3's reactor and TX thread wait in FreeRTOS ticks (1 ms), coarser than on Linux.
 - Reverse telemetry (receiver → `stream_sender`, for adaptive FEC) is off.
