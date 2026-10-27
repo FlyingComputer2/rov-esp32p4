@@ -61,9 +61,11 @@ constexpr size_t k_video_tx_capacity = 256;
 constexpr size_t k_video_rx_capacity = 16;
 
 /* Runs winject-l3's radio RX demux and upstream 1, and wakes the proxy's
- * d-plane task (which does the blocking SDIO writes). Not pinned: it is light
- * next to the encoder and FEC, but must not wait behind them. */
-constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, -1, 14};
+ * d-plane task (which does the blocking SDIO writes). Pinned to core 1: left
+ * unpinned it is woken by vs_send (core 1, same priority) and so preempts
+ * vs_isp_tx (core 0, priority 13) instead of taking core 1's idle time, and
+ * core 0 ran out of time above ~8 Mbit/s. */
+constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 14};
 
 /* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING,
  * no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
@@ -223,9 +225,10 @@ vstreamer::idf::live_tx_config video_config()
     cfg.mplane_port = k_video_mplane_port;
     cfg.src = {{"buffers", "6"}, {"fps", "30"},    {"bitrate", "6000000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
-    /* In order: fec_n before fec_k, since k may not exceed the current n. */
-    cfg.snd = {{"telemetry", "off"}, {"fec", "block"},        {"fec_n", "31"},
-               {"fec_k", "21"},      {"fec_spread_ms", "75"}};
+    /* In order: fec_k before fec_n, since k may not exceed the current n (sender starts at
+     * k=10, n=12). */
+    cfg.snd = {{"telemetry", "off"}, {"fec", "block"},       {"fec_k", "6"},
+               {"fec_n", "8"},       {"fec_spread_ms", "4"}};
     return cfg;
 }
 
