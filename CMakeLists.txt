@@ -19,7 +19,7 @@ FetchContent_Declare(bfc
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG fb3eea11d3edc81ce39287a8fd5c77e3d43d41f1
+    GIT_TAG dd1a6a7b05d37145a7a8ab939916cb76851419ad
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
@@ -29,7 +29,7 @@ FetchContent_Declare(winject_sdio_proxy
 # is declared first wins, so keep their pins equal.
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 74db519187f716fb443b5fe546c2e947099e41c1
+    GIT_TAG e4fd44853249b74113b76f4ff668d87c5b3b8deb
 )
 foreach(dep winject_l3 winject_sdio_proxy vstreamer)
     FetchContent_GetProperties(${dep})
