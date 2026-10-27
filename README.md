@@ -33,6 +33,28 @@ idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 
 `idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over HTTP (`curl --data-binary @build/rover-remote-esp32p4.bin http://<P4 IP>/update/p4`); the config partition is not touched by that.
 
+### C6 (Waveshare ESP32-P4-WIFI6-DEV-KIT)
+
+| C6 | P4 | Notes |
+|---|---|---|
+| `U0TXD` / `U0RXD` | GPIO32 / GPIO33 | The reverse of the Guition (GPIO32 → `U0RXD` there). Not on GPIO37/38: those are the P4's UART0, shared with the board's USB-UART |
+| `GPIO9` (boot strap) | GPIO22 | `main.cpp` sets `boot_gpio = 22`, no LDO (the proxy default is the Guition's GPIO45 + LDO_VO4) |
+| `CHIP_PU` | GPIO54 | Proxy default |
+| SDIO | slot 1: CLK 18, CMD 19, D0–D3 14–17 | Proxy default |
+
+Update the C6 over SDIO: `curl --data-binary @winject-esp32c6.bin http://<P4 IP>/update/c6`. For a UART flash, put rover-ground-esp32p4's [`tools/c6-uart-bridge`](https://github.com/FlyingComputer2/rover-ground-esp32p4/tree/main/tools/c6-uart-bridge) on the P4 with the Waveshare settings. It holds the C6 in its ROM downloader and bridges `/dev/ttyACM0` to the C6 at 115200:
+
+```bash
+cd rover-ground-esp32p4/tools/c6-uart-bridge
+idf.py -B build-waveshare -D SDKCONFIG=build-waveshare/sdkconfig \
+  -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.waveshare" -p /dev/ttyACM0 flash
+python -m esptool --chip esp32c6 -p /dev/ttyACM0 -b 115200 --before no_reset --after no_reset flash_id
+# write_flash as in winject-radio-esp32c6, then reflash this app with `idf.py flash`
+# (the bridge replaces the bootloader and partition table)
+```
+
+Opening `/dev/ttyACM0` at 115200 resets the P4.
+
 Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops, `ROVER_VIDEO_EXIT rc=…` if live TX stops (it restarts after 3 s); `live TX …` and `sys cpu …` lines from vstreamer every 10 s; winject-l3 logs its own stats every `winject.stats_sec`.
 
 ## Config
