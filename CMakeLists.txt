@@ -19,11 +19,11 @@ FetchContent_Declare(bfc
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG dd1a6a7b05d37145a7a8ab939916cb76851419ad
+    GIT_TAG 8ff2517a0818da2d5e7eac11cd0d386b82042581
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
-    GIT_TAG ad4a1672424b726b4d9b8596180a3ed02e04b330
+    GIT_TAG 0dc783a1b0fd1aadd9c88620af47dde5e8150630
 )
 # vstreamer and winject-l3 also share the isa-l FetchContent name; whichever
 # is declared first wins, so keep their pins equal.
