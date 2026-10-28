@@ -7,14 +7,18 @@
 // one shared cv_reactor (k_dp_reactor):
 //   winject-l3 --wifi_tx--> proxy -> SDIO -> C6     (radio.dplane_tx)
 //   winject-l3 <--wifi_rx-- proxy <- SDIO <- C6     (radio.dplane_rx)
-//   vstreamer --video_tx--> winject-l3 upstream 1   (upstream-1.rx)
-//   vstreamer <--video_rx-- winject-l3 upstream 1   (upstream-1.tx)
-// The radio m-plane and upstreams 0 and 2 stay on UDP loopback.
+//   vstreamer --video_tx--> winject-l3 upstream 0   (upstream-0.rx)
+//   vstreamer <--video_rx-- winject-l3 upstream 0   (upstream-0.tx)
+// Upstream 1 is the bandwidth tester (app_bwtest, UDP console 5100) on an
+// L3-owned queue; its console also takes video_stop / video_start (pause and
+// resume live TX). The radio
+// m-plane stays on UDP loopback.
 
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <thread>
@@ -24,11 +28,13 @@
 #include <bfc/shared_sized_buffer.hpp>
 
 #include "WinjectL3.h"
+#include "apps/bwtest/Bwtest.h"
 #include "core/thread_spawn.hpp"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_pthread.h"
 #include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -60,14 +66,14 @@ constexpr size_t k_wifi_queue_capacity = 256;
 constexpr size_t k_video_tx_capacity = 256;
 constexpr size_t k_video_rx_capacity = 16;
 
-/* Runs winject-l3's radio RX demux and upstream 1, and wakes the proxy's
+/* Runs winject-l3's radio RX demux and upstream 0 (video), and wakes the proxy's
  * d-plane task (which does the blocking SDIO writes). Pinned to core 1: left
  * unpinned it is woken by vs_send (core 1, same priority) and so preempts
  * vs_isp_tx (core 0, priority 13) instead of taking core 1's idle time, and
  * core 0 ran out of time above ~8 Mbit/s. */
 constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 14};
 
-/* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING,
+/* Video into winject-l3's upstream 0 (config/winject.conf: QUEUE_FORWARDING,
  * no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
  * protects the stream end to end; datagrams must stay within winject-l3's
  * 1445-byte application limit, which the payloader's 1400-byte mtu (live TX
@@ -78,6 +84,10 @@ constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 1
  * was clean. Bitrate (src bitrate), FEC and spread can be changed at run time
  * on the vstreamer m-plane (UDP 5090). */
 constexpr int k_video_mplane_port = 5090;
+
+/* Upstream 1 in config/winject.conf: the bandwidth tester's L3-owned queue. */
+constexpr size_t k_bwtest_upstream = 1;
+constexpr const char* k_bwtest_console = "0.0.0.0:5100";
 
 using dp_queue = bfc::reactive_circular_lossy_queue<bfc::shared_sized_buffer>;
 using dp_queue_registry = bfc::cv_reactor_circular_lossy_queue_registry<bfc::shared_sized_buffer>;
@@ -167,9 +177,73 @@ esp_err_t mount_config()
     return esp_vfs_spiffs_register(&conf);
 }
 
+/* video_stop / video_start: pause and resume live TX (live_tx_config::
+ * pause_request). Camera and encoder keep running; a real stop could not
+ * restart, the 1080p encoder cannot be reopened after a run. */
+std::atomic<bool> g_video_pause {false};
+
+std::string video_stop_command(const std::string&)
+{
+    g_video_pause.store(true);
+    return "ok\n";
+}
+
+std::string video_start_command(const std::string&)
+{
+    g_video_pause.store(false);
+    return "ok\n";
+}
+
+/* Runs app_bwtest on its upstream's queue. Its sender and receive poller
+ * inherit this thread's settings: low priority, unpinned, so video wins. */
+void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
+{
+    static bool started = false;
+    if (started)
+    {
+        ESP_LOGW(TAG, "bwtest upstream replaced; restart to rebind the tester");
+        return;
+    }
+    started = true;
+    esp_pthread_cfg_t prev {};
+    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.stack_size = 6 * 1024;
+    cfg.prio = 5;
+    cfg.thread_name = "bwtest";
+    cfg.inherit_cfg = true;
+    esp_pthread_set_cfg(&cfg);
+    std::thread(
+        [up = std::move(up)]
+        {
+            app_bwtest::Config bw;
+            bw.upstream = up;
+            bw.console = k_bwtest_console;
+            bw.commands = {{"video_stop", video_stop_command},
+                           {"video_start", video_start_command}};
+            const int rc = app_bwtest::main(bw);
+            printf("ROVER_BWTEST_EXIT rc=%d\n", rc);
+            fflush(stdout);
+        })
+        .detach();
+    if (had_prev)
+    {
+        esp_pthread_set_cfg(&prev);
+    }
+}
+
 void* run_l3(void*)
 {
     winject::Config cfg;
+    /* Set before load(): its validation needs the callback for an L3-owned
+     * queue upstream. */
+    cfg.on_upstream_queue = [](size_t index, std::shared_ptr<winject::UpstreamQueue> up)
+    {
+        if (index == k_bwtest_upstream)
+        {
+            start_bwtest(std::move(up));
+        }
+    };
     std::string err;
     if (!cfg.load(k_config_path, &err))
     {
@@ -234,7 +308,8 @@ vstreamer::idf::live_tx_config video_config()
 
 void run_video()
 {
-    const vstreamer::idf::live_tx_config cfg = video_config();
+    vstreamer::idf::live_tx_config cfg = video_config();
+    cfg.pause_request = &g_video_pause;
     for (;;)
     {
         const int rc = vstreamer::idf::run_live_tx(cfg);
