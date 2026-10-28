@@ -1,4 +1,4 @@
-# rover-remote-esp32p4
+# rov-esp32p4
 
 Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP32-C6 on SDIO as the radio). One image runs:
 
@@ -14,7 +14,7 @@ Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP3
 
 `main/main.cpp` registers the four queues (`bfc::cv_reactor_circular_lossy_queue_registry`) and one `bfc::cv_reactor` (`rover_dp`, its own thread) before starting the three, and keeps them for the life of the program. The proxy, winject-l3 (`radio.dplane_tx` / `radio.dplane_rx` / `radio.reactor`, upstream 0 `QUEUE_FORWARDING`) and vstreamer (`live_tx_config.queue_*`) bind them by name. A full queue drops its oldest datagram: the proxy counts it as `dup_evict`, winject-l3 in its metrics, vstreamer in `snd` stats.
 
-The GS side is [rover-ground-esp32p4](https://github.com/FlyingComputer2/rover-ground-esp32p4): winject-l3, the SDIO proxy and the video receiver on a Guition P4 + C6. Its L3 config is built in (`l3_main()` in its `main/main.cpp`) and pairs with [`config/winject.conf`](config/winject.conf) by domain, channel and upstream id, with buses swapped. The earlier GS, [rover-ground](https://github.com/FlyingComputer2/rover-ground) (winject-l3 + RTL8812AU on the opi5), is archived.
+The GS side is [gnd-esp32p4](https://github.com/FlyingComputer2/gnd-esp32p4): winject-l3, the SDIO proxy and the video receiver on a Guition P4 + C6. Its L3 config is built in (`l3_main()` in its `main/main.cpp`) and pairs with [`config/winject.conf`](config/winject.conf) by domain, channel and upstream id, with buses swapped. The earlier GS, [gnd](https://github.com/FlyingComputer2/gnd) (winject-l3 + RTL8812AU on the opi5), is archived.
 
 All three come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). All three fetch bfc under one FetchContent name and must use the same bfc (they share its registries); the top-level `CMakeLists.txt` declares it first, so it wins, and its pin should stay equal to theirs. vstreamer and winject-l3 also share ISA-L, so bump their pins together. To build against local checkouts:
 
@@ -32,7 +32,7 @@ Native ESP-IDF v5.5 (`. ~/esp/esp-idf-v5.5.5/export.sh`); P4 USB-UART on the Typ
 idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 ```
 
-`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over HTTP (`curl --data-binary @build/rover-remote-esp32p4.bin http://<P4 IP>/update/p4`); the config partition is not touched by that.
+`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over HTTP (`curl --data-binary @build/rov-esp32p4.bin http://<P4 IP>/update/p4`); the config partition is not touched by that.
 
 ### C6 (Waveshare ESP32-P4-WIFI6-DEV-KIT)
 
@@ -43,10 +43,10 @@ idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 | `CHIP_PU` | GPIO54 | Proxy default |
 | SDIO | slot 1: CLK 18, CMD 19, D0–D3 14–17 | Proxy default |
 
-Update the C6 over SDIO: `curl --data-binary @winject-esp32c6.bin http://<P4 IP>/update/c6`. For a UART flash, put rover-ground-esp32p4's [`tools/c6-uart-bridge`](https://github.com/FlyingComputer2/rover-ground-esp32p4/tree/main/tools/c6-uart-bridge) on the P4 with the Waveshare settings. It holds the C6 in its ROM downloader and bridges `/dev/ttyACM0` to the C6 at 115200:
+Update the C6 over SDIO: `curl --data-binary @winject-esp32c6.bin http://<P4 IP>/update/c6`. For a UART flash, put gnd-esp32p4's [`tools/c6-uart-bridge`](https://github.com/FlyingComputer2/gnd-esp32p4/tree/main/tools/c6-uart-bridge) on the P4 with the Waveshare settings. It holds the C6 in its ROM downloader and bridges `/dev/ttyACM0` to the C6 at 115200:
 
 ```bash
-cd rover-ground-esp32p4/tools/c6-uart-bridge
+cd gnd-esp32p4/tools/c6-uart-bridge
 idf.py -B build-waveshare -D SDKCONFIG=build-waveshare/sdkconfig \
   -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.waveshare" -p /dev/ttyACM0 flash
 python -m esptool --chip esp32c6 -p /dev/ttyACM0 -b 115200 --before no_reset --after no_reset flash_id

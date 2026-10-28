@@ -45,4 +45,4 @@ set(EXTRA_COMPONENT_DIRS
     ${vstreamer_SOURCE_DIR}/idf/vstreamer
     ${WINJECT_SDIO_PROXY_COMPONENT_DIRS})
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(rover-remote-esp32p4)
+project(rov-esp32p4)
