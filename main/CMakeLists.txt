@@ -1,5 +1,5 @@
 idf_component_register(SRCS "main.cpp"
-                       PRIV_REQUIRES winject_l3 winject_proxy vstreamer esp_eth esp_netif esp_event
+                       PRIV_REQUIRES winject_l3 app_bwtest winject_proxy vstreamer esp_eth esp_netif esp_event
                                      nvs_flash spiffs pthread)
 # bfc (the d-plane queues) throws on fatal errors; with IDF's C++ exceptions
 # off a throw aborts.
