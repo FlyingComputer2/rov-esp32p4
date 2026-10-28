@@ -31,9 +31,9 @@ FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
     GIT_TAG 187c140d41e0f4ef7e8d59e1f585d82bf9d072fa
 )
-# Clock sync (rover = SynchClient on L3 upstream 0). Private repo: SSH.
+# Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono
-    GIT_REPOSITORY git@github.com:FlyingComputer2/krono.git
+    GIT_REPOSITORY https://github.com/FlyingComputer2/krono.git
     GIT_TAG c7dc5caaca89d93467ddb2dfb349a8f7ef30f005
 )
 foreach(dep winject_l3 winject_sdio_proxy vstreamer krono)
