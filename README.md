@@ -196,7 +196,9 @@ echo save | nc -u -w1 192.168.253.28 5120
 tools/rc_gamepad.py --ground 192.168.253.25                # drive through the ground P4
 ```
 
-Console: `ROVER_SAMPLE state=… ` (the `status` text) every 10 s; `rover_sample: imu …, mag …` at start.
+Console: `ROVER_SAMPLE uptime_s=… state=…` (the `status` text) every 10 s; `rover_sample: imu …, mag …` at start.
+
+Memory: live TX needs the internal RAM. With rover_sample's stacks there (20 KB left) it fell to ~20 fps, so all of rover_sample's stacks are in PSRAM (live TX 29 fps, ~35 KB internal left). NVS access, which writes flash and so needs an internal stack, runs on a short-lived task with its stack in RTC RAM. A `save` stalls the control loop for a few ms (flash write).
 
 Host tests: `cmake -S tests -B build-tests && cmake --build build-tests && build-tests/rover_sample_test`.
 
