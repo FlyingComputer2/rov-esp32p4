@@ -5,14 +5,15 @@ Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP3
 - **winject SDIO proxy** ([winject-radio-esp32-sdio-proxy](https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy)): drives the C6 ([winject-radio-esp32c6](https://github.com/winject-wireless/winject-radio-esp32c6)) and exposes it as a winject radio: m-plane on UDP 22, d-plane on in-process queues, plus HTTP firmware update.
 - **winject-l3** ([winject-l3](https://github.com/winject-wireless/winject-l3), `idf/winject_l3`): winject-manager on a pthread, using that radio (`radio.mplane = 127.0.0.1:22`, `radio.dplane_tx/_rx` queues).
 - **vstreamer** ([vstreamer](https://github.com/FlyingComputer2/vstreamer), `idf/vstreamer`): live TX (`vstreamer::idf::run_live_tx`): OV5647 MIPI-CSI camera → ISP + hardware H.264 (1080p30, 6 Mbit/s) → RTP → `stream_sender` with RS FEC 21/31, into winject-l3's video upstream over queues.
-- **app_bwtest** (winject-l3, `idf/app_bwtest`): bandwidth tester on upstream 1, an L3-owned queue; UDP console 5100 (see [Bandwidth test](#bandwidth-test)).
+- **krono** ([FlyingComputer2/krono](https://github.com/FlyingComputer2/krono), `idf/krono`): clock-sync client on upstream 0, an L3-owned queue; the ground P4 is the server and holds the reference clock. UDP console 5110 (see [Clock sync](#clock-sync)).
+- **app_bwtest** (winject-l3, `idf/app_bwtest`): bandwidth tester on upstream 2, an L3-owned queue; UDP console 5100 (see [Bandwidth test](#bandwidth-test)).
 
 ```
  camera ─▶ vstreamer live TX ──video_tx / video_rx──▶ winject-l3 ──wifi_tx / wifi_rx──▶ winject_proxy ──SDIO──▶ C6 ─▶ air
                                                        └──── loopback UDP 22 (m-plane) ────┘
 ```
 
-`main/main.cpp` registers the four queues (`bfc::cv_reactor_circular_lossy_queue_registry`) and one `bfc::cv_reactor` (`rover_dp`, its own thread) before starting the three, and keeps them for the life of the program. The proxy, winject-l3 (`radio.dplane_tx` / `radio.dplane_rx` / `radio.reactor`, upstream 0 `QUEUE_FORWARDING`) and vstreamer (`live_tx_config.queue_*`) bind them by name. A full queue drops its oldest datagram: the proxy counts it as `dup_evict`, winject-l3 in its metrics, vstreamer in `snd` stats.
+`main/main.cpp` registers the four queues (`bfc::cv_reactor_circular_lossy_queue_registry`) and one `bfc::cv_reactor` (`rover_dp`, its own thread) before starting the three, and keeps them for the life of the program. The proxy, winject-l3 (`radio.dplane_tx` / `radio.dplane_rx` / `radio.reactor`, upstream 1 `QUEUE_FORWARDING`) and vstreamer (`live_tx_config.queue_*`) bind them by name. A full queue drops its oldest datagram: the proxy counts it as `dup_evict`, winject-l3 in its metrics, vstreamer in `snd` stats.
 
 The GS side is [gnd-esp32p4](https://github.com/FlyingComputer2/gnd-esp32p4): winject-l3, the SDIO proxy and the video receiver on a Guition P4 + C6. Its L3 config is built in (`l3_main()` in its `main/main.cpp`) and pairs with [`config/winject.conf`](config/winject.conf) by domain, channel and upstream id, with buses swapped. The earlier GS, [gnd](https://github.com/FlyingComputer2/gnd) (winject-l3 + RTL8812AU on the opi5), is archived.
 
@@ -38,7 +39,7 @@ idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 
 | C6 | P4 | Notes |
 |---|---|---|
-| `U0TXD` / `U0RXD` | GPIO32 / GPIO33 | The reverse of the Guition (GPIO32 → `U0RXD` there). Not on GPIO37/38: those are the P4's UART0, shared with the board's USB-UART |
+| `U0RXD` / `U0TXD` | GPIO32 / GPIO33 | Same as the Guition (the wires were swapped to match; earlier U0TXD was on GPIO32). Not on GPIO37/38: those are the P4's UART0, shared with the board's USB-UART |
 | `GPIO9` (boot strap) | GPIO22 | `main.cpp` sets `boot_gpio = 22`, no LDO (the proxy default is the Guition's GPIO45 + LDO_VO4) |
 | `CHIP_PU` | GPIO54 | Proxy default |
 | SDIO | slot 1: CLK 18, CMD 19, D0–D3 14–17 | Proxy default |
@@ -60,18 +61,50 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 
 ## Config
 
-[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and two upstreams. The ground P4 carries the same two, buses swapped:
+[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and three upstreams. The ground P4 carries the same three, buses swapped. Buses belong to the flow, not the index:
 
 | id | Stream | Rover endpoint | Buses (tx / rx) | Manager FEC |
 |----|--------|----------------|-----------------|-------------|
-| 0 | Video (vstreamer live TX) | queues `video_tx` (in) / `video_rx` (out) | c3 / d4 | none: vstreamer's own RS FEC runs end to end |
-| 1 | Bandwidth tester (app_bwtest) | L3-owned queue, handed to the tester by `main/main.cpp` | f6 / e5 | none |
+| 0 | Clock sync (krono SynchClient) | L3-owned queue, handed to the client by `main/main.cpp` | b2 / a1 | none |
+| 1 | Video (vstreamer live TX) | queues `video_tx` (in) / `video_rx` (out) | c3 / d4 | none: vstreamer's own RS FEC runs end to end |
+| 2 | Bandwidth tester (app_bwtest) | L3-owned queue, handed to the tester by `main/main.cpp` | f6 / e5 | none |
+
+Only the ids moved: video and the tester kept their buses, so they still pair with an older image on the other board. Sync needs both boards on this layout (an older image counts its frames as `rx_drop_bus`).
 
 The video settings (bitrate, FEC 21/31, `fec_spread_ms` 75; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed at run time on the vstreamer m-plane, UDP 5090 (`get/set src|pay|snd <key>`, `get sys stats`). The manager console and the vstreamer m-plane have no authentication; they are bound to all interfaces because the rover's Ethernet is an internal link.
 
+## Clock sync
+
+krono synch runs on upstream 0. The ground P4 runs `SynchServer`, and its `CLOCK_REALTIME` is the reference. The rover runs `SynchClient`: once a second it measures its offset and steers its own `CLOCK_REALTIME`. It steps on the first sample or on an error over 20 ms, and slews with `adjtime` below that. Protocol and wire: krono [docs/synch.md](https://github.com/FlyingComputer2/krono/blob/main/docs/synch.md).
+
+- **rtt** (default): `sync_request{trid}` / `sync_response{trid, server_time_us}`. The client applies the lowest-delay sample of the last 8, so its accuracy is bounded by queueing asymmetry on the air path (milliseconds under video).
+- **interrupt**: the rover pulls the sync wire low, then sends `sync_interrupt_request{trid}`. The ground replies with the time its ISR stamped the falling edge, so the air delay drops out.
+
+- **monitor**: steers by rtt and grades it. Each second the wire first reads the rover's clock error, without correcting it, then rtt corrects. `status` adds `wire_last_us`, `wire_mean_us`, `wire_rms_us`, `wire_min_us`, `wire_max_us` and `wire_samples` (rover minus ground, since `mode monitor` or `clr`). This is the accuracy figure for rtt under the current load.
+
+Sync wire: active low, Hi-Z at rest. The rover's pin is open drain and released between pulses. The ground's pin is an input with the internal pull-up and is the wire's only pull-up.
+
+| Signal | Rover (Waveshare 40-pin header) | Ground (Guition JP1) |
+|--------|---------------------------------|----------------------|
+| SYNC (active low) | GPIO20, pin 13 | GPIO20, pin 17 |
+| GND | pin 14 | pin 6 |
+
+Console on UDP 5110 (both boards), one command per datagram:
+
+| Command | Effect |
+|---------|--------|
+| `status` | Client: `mode`, `synced`, `error_us` (rover clock minus ground clock at the last correction), `offset_us` / `delay_us` of the applied sample, `requests`, `replies`, `timeouts`, `stale`, `steps`, `slews`. Server: `time_us`, `requests`, `interrupt_requests`, `replies`, `no_edge`, `bad` |
+| `mode <rtt\|interrupt\|monitor>` | Client only: switch the measurement |
+| `clr` | Client only: zero the monitor statistics |
+
+```bash
+echo status | nc -u -w1 192.168.253.28 5110
+echo "mode interrupt" | nc -u -w1 192.168.253.28 5110
+```
+
 ## Bandwidth test
 
-app_bwtest runs on both P4s on upstream 1. Its console is UDP 5100, one command per datagram, reply to the sender:
+app_bwtest runs on both P4s on upstream 2. Its console is UDP 5100, one command per datagram, reply to the sender:
 
 | Command | Effect |
 |---------|--------|
@@ -85,7 +118,7 @@ echo "test_send 2000 10000" | nc -u -w1 192.168.253.28 5100   # rover -> ground,
 echo stats | nc -u -w1 192.168.253.25 5100                    # what the ground received
 ```
 
-Air loss is the receiving L3's `lur` `rxgap` on upstream 1; `rx_push_drop` there counts datagrams the tester did not drain in time.
+Air loss is the receiving L3's `lur` `rxgap` on upstream 2; `rx_push_drop` there counts datagrams the tester did not drain in time.
 
 ## Status
 

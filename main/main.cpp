@@ -7,12 +7,12 @@
 // one shared cv_reactor (k_dp_reactor):
 //   winject-l3 --wifi_tx--> proxy -> SDIO -> C6     (radio.dplane_tx)
 //   winject-l3 <--wifi_rx-- proxy <- SDIO <- C6     (radio.dplane_rx)
-//   vstreamer --video_tx--> winject-l3 upstream 0   (upstream-0.rx)
-//   vstreamer <--video_rx-- winject-l3 upstream 0   (upstream-0.tx)
-// Upstream 1 is the bandwidth tester (app_bwtest, UDP console 5100) on an
-// L3-owned queue; its console also takes video_stop / video_start (pause and
-// resume live TX). The radio
-// m-plane stays on UDP loopback.
+//   vstreamer --video_tx--> winject-l3 upstream 1   (upstream-1.rx)
+//   vstreamer <--video_rx-- winject-l3 upstream 1   (upstream-1.tx)
+// Upstream 0 is clock sync (krono SynchClient, UDP console 5110) and upstream
+// 2 the bandwidth tester (app_bwtest, UDP console 5100), both on L3-owned
+// queues; the tester's console also takes video_stop / video_start (pause
+// and resume live TX). The radio m-plane stays on UDP loopback.
 
 #include <inttypes.h>
 #include <pthread.h>
@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <bfc/cv_reactor.hpp>
 #include <bfc/event_queue.hpp>
@@ -29,6 +30,7 @@
 
 #include "WinjectL3.h"
 #include "apps/bwtest/Bwtest.h"
+#include "synch/SynchGpio.h"
 #include "core/thread_spawn.hpp"
 #include "esp_eth.h"
 #include "esp_event.h"
@@ -66,14 +68,14 @@ constexpr size_t k_wifi_queue_capacity = 256;
 constexpr size_t k_video_tx_capacity = 256;
 constexpr size_t k_video_rx_capacity = 16;
 
-/* Runs winject-l3's radio RX demux and upstream 0 (video), and wakes the proxy's
+/* Runs winject-l3's radio RX demux and upstream 1 (video), and wakes the proxy's
  * d-plane task (which does the blocking SDIO writes). Pinned to core 1: left
  * unpinned it is woken by vs_send (core 1, same priority) and so preempts
  * vs_isp_tx (core 0, priority 13) instead of taking core 1's idle time, and
  * core 0 ran out of time above ~8 Mbit/s. */
 constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 14};
 
-/* Video into winject-l3's upstream 0 (config/winject.conf: QUEUE_FORWARDING,
+/* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING,
  * no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
  * protects the stream end to end; datagrams must stay within winject-l3's
  * 1445-byte application limit, which the payloader's 1400-byte mtu (live TX
@@ -85,9 +87,17 @@ constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 1
  * on the vstreamer m-plane (UDP 5090). */
 constexpr int k_video_mplane_port = 5090;
 
-/* Upstream 1 in config/winject.conf: the bandwidth tester's L3-owned queue. */
-constexpr size_t k_bwtest_upstream = 1;
+/* Upstream 2 in config/winject.conf: the bandwidth tester's L3-owned queue. */
+constexpr size_t k_bwtest_upstream = 2;
 constexpr const char* k_bwtest_console = "0.0.0.0:5100";
+
+/* Upstream 0: the clock-sync client's L3-owned queue; the ground P4 is the
+ * server and its clock the reference. Interrupt mode pulses GPIO20 (header
+ * pin 13, GND on pin 14), open drain, active low, to the ground's GPIO20
+ * (JP1 pin 17). */
+constexpr size_t k_synch_upstream = 0;
+constexpr const char* k_synch_console = "0.0.0.0:5110";
+constexpr int k_synch_pulse_gpio = 20;
 
 using dp_queue = bfc::reactive_circular_lossy_queue<bfc::shared_sized_buffer>;
 using dp_queue_registry = bfc::cv_reactor_circular_lossy_queue_registry<bfc::shared_sized_buffer>;
@@ -232,6 +242,63 @@ void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
     }
 }
 
+/* krono's datagram transport over an L3-owned upstream queue. */
+krono::Transport synch_transport(std::shared_ptr<winject::UpstreamQueue> up)
+{
+    return krono::Transport {
+        [up](const uint8_t* data, size_t len) { return up->try_send(data, len); },
+        [up](std::vector<uint8_t>* out)
+        {
+            auto packet = up->receive();
+            if (!packet)
+            {
+                return false;
+            }
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
+            out->assign(p, p + packet->size());
+            return true;
+        }};
+}
+
+/* Runs the clock-sync client on its upstream's queue, rtt mode at first
+ * (`mode interrupt` on its console switches). Priority 12, well above the
+ * tester, so its timestamps are taken on time; it sleeps between 1 ms polls,
+ * so it costs video little. */
+void start_synch(std::shared_ptr<winject::UpstreamQueue> up)
+{
+    static bool started = false;
+    if (started)
+    {
+        ESP_LOGW(TAG, "synch upstream replaced; restart to rebind the client");
+        return;
+    }
+    started = true;
+    esp_pthread_cfg_t prev {};
+    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.stack_size = 6 * 1024;
+    cfg.prio = 12;
+    cfg.thread_name = "synch";
+    cfg.inherit_cfg = true;
+    esp_pthread_set_cfg(&cfg);
+    std::thread(
+        [up = std::move(up)]
+        {
+            krono::ClientConfig sc;
+            sc.transport = synch_transport(up);
+            sc.console = k_synch_console;
+            sc.options.pulse = krono::make_gpio_pulse(k_synch_pulse_gpio);
+            const int rc = krono::client_main(sc);
+            printf("ROVER_SYNCH_EXIT rc=%d\n", rc);
+            fflush(stdout);
+        })
+        .detach();
+    if (had_prev)
+    {
+        esp_pthread_set_cfg(&prev);
+    }
+}
+
 void* run_l3(void*)
 {
     winject::Config cfg;
@@ -242,6 +309,10 @@ void* run_l3(void*)
         if (index == k_bwtest_upstream)
         {
             start_bwtest(std::move(up));
+        }
+        else if (index == k_synch_upstream)
+        {
+            start_synch(std::move(up));
         }
     };
     std::string err;
