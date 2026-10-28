@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -19,9 +20,11 @@
 #include "controller.hpp"
 #include "drivers.hpp"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_pthread.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "msp.hpp"
 #include "nvs.h"
@@ -64,6 +67,57 @@ bool parse_host_port(const std::string& s, sockaddr_in* out)
 }
 
 // What the control task publishes each cycle.
+/* NVS writes flash, which needs a stack in internal RAM (the cache is off
+ * meanwhile); rover_sample's threads are on PSRAM stacks, so NVS access runs
+ * on a short-lived task with an internal stack. False if that task cannot be
+ * created. */
+bool on_internal_stack(const std::function<void()>& f)
+{
+    struct job
+    {
+        const std::function<void()>* f;
+        SemaphoreHandle_t done;
+    } j {&f, xSemaphoreCreateBinary()};
+    if (!j.done)
+    {
+        return false;
+    }
+    /* The flash code accepts a stack in L2 RAM or RTC (LP) RAM, not PSRAM or
+     * the SPM (0x30100000, which plain MALLOC_CAP_INTERNAL may return). With
+     * live TX running, L2 RAM's DMA-capable part is down to a few hundred
+     * bytes per block, so RTC RAM first. */
+    static const UBaseType_t k_caps[] = {MALLOC_CAP_RTCRAM | MALLOC_CAP_8BIT,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT};
+    BaseType_t ok = pdFAIL;
+    for (UBaseType_t caps : k_caps)
+    {
+        ok = xTaskCreatePinnedToCoreWithCaps(
+            [](void* arg)
+            {
+                auto* jb = static_cast<job*>(arg);
+                (*jb->f)();
+                xSemaphoreGive(jb->done);
+                vTaskDeleteWithCaps(nullptr);
+            },
+            "rs_nvs", 3 * 1024, &j, 5, nullptr, tskNO_AFFINITY, caps);
+        if (ok == pdPASS)
+        {
+            break;
+        }
+    }
+    if (ok != pdPASS)
+    {
+        ESP_LOGE(TAG, "NVS task not created (largest RTC block %u, internal DMA block %u)",
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(k_caps[0])),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(k_caps[1])));
+        vSemaphoreDelete(j.done);
+        return false;
+    }
+    xSemaphoreTake(j.done, portMAX_DELAY);
+    vSemaphoreDelete(j.done);
+    return true;
+}
+
 struct status
 {
     control_output out;
@@ -153,13 +207,18 @@ int app::run()
 
     load_params();
 
-    // Lower priority than the link loop; inherits stack and core settings.
+    /* Internal RAM is short with 1080p live TX running: with rover_sample's
+     * stacks internal (20 KB left) live TX fell to ~20 fps, its sender and FEC
+     * ~5x slower; on PSRAM stacks it runs at 29 fps as without rover_sample.
+     * So every rover_sample stack is in PSRAM (the caller's too, see main.cpp)
+     * and only NVS access borrows an internal one (on_internal_stack). */
     esp_pthread_cfg_t prev {};
     const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
     esp_pthread_cfg_t ccfg = esp_pthread_get_default_config();
     ccfg.stack_size = 6 * 1024;
     ccfg.prio = 5;
     ccfg.thread_name = "rs_console";
+    ccfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     esp_pthread_set_cfg(&ccfg);
     std::thread(&app::console_loop, this, fd).detach();
     if (had_prev)
@@ -167,8 +226,9 @@ int app::run()
         esp_pthread_set_cfg(&prev);
     }
 
-    if (xTaskCreatePinnedToCore(control_trampoline, "rs_control", 6 * 1024, this, cfg_.control_prio,
-                                nullptr, cfg_.control_core) != pdPASS)
+    if (xTaskCreatePinnedToCoreWithCaps(control_trampoline, "rs_control", 6 * 1024, this, cfg_.control_prio,
+                                        nullptr, cfg_.control_core, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) !=
+        pdPASS)
     {
         ESP_LOGE(TAG, "control task not created");
         return 1;
@@ -632,11 +692,11 @@ std::string app::status_text()
     const int64_t now = esp_timer_get_time();
     char b[640];
     snprintf(b, sizeof(b),
-             "state=%s mode=%s%s rc_src=%u rc_age_ms=%d rc_loss=%u rc_lat_ms=%u rc_frames=%" PRIu32
+             "uptime_s=%lld state=%s mode=%s%s rc_src=%u rc_age_ms=%d rc_loss=%u rc_lat_ms=%u rc_frames=%" PRIu32
              " rc_rej=%" PRIu32 " imu=%s gyro_cal=%d mag=%s%s r_cmd=%.1f r_meas=%.1f steer=%.3f"
              " servo_us=%.0f motor=%s duty=%.3f v_est=%.2f i_a=%.2f bts=%d deadman=%d bts_fault=%d"
              " heading=%.1f roll=%.1f pitch=%.1f i2c_err=%" PRIu32 " overruns=%" PRIu32 " loop_max_ms=%.2f",
-             states[static_cast<int>(s.out.st)], modes[static_cast<int>(s.out.mode)],
+             static_cast<long long>(now / 1000000), states[static_cast<int>(s.out.st)], modes[static_cast<int>(s.out.mode)],
              s.out.imu_degraded ? "(imu)" : "", link_.source(),
              link_.ever() ? static_cast<int>((now - link_.last_us()) / 1000) : -1, link_.loss_permille(),
              link_.latency_p50_ms(), link_.frames(), link_.rejected(),
@@ -817,34 +877,43 @@ bool app::save_params()
             blob.insert(blob.end(), e.begin(), e.end());
         }
     }
-    nvs_handle_t h;
-    if (nvs_open(k_nvs_ns, NVS_READWRITE, &h) != ESP_OK)
-    {
-        return false;
-    }
-    const bool ok = nvs_set_blob(h, k_nvs_key, blob.data(), blob.size()) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
+    bool ok = false;
+    on_internal_stack(
+        [&]
+        {
+            nvs_handle_t h;
+            if (nvs_open(k_nvs_ns, NVS_READWRITE, &h) != ESP_OK)
+            {
+                return;
+            }
+            ok = nvs_set_blob(h, k_nvs_key, blob.data(), blob.size()) == ESP_OK && nvs_commit(h) == ESP_OK;
+            nvs_close(h);
+        });
     return ok;
 }
 
 void app::load_params()
 {
-    nvs_handle_t h;
-    if (nvs_open(k_nvs_ns, NVS_READONLY, &h) != ESP_OK)
-    {
-        return;
-    }
-    size_t len = 0;
     std::vector<uint8_t> blob;
-    if (nvs_get_blob(h, k_nvs_key, nullptr, &len) == ESP_OK && len % 5 == 0)
-    {
-        blob.resize(len);
-        if (nvs_get_blob(h, k_nvs_key, blob.data(), &len) != ESP_OK)
+    on_internal_stack(
+        [&]
         {
-            blob.clear();
-        }
-    }
-    nvs_close(h);
+            nvs_handle_t h;
+            if (nvs_open(k_nvs_ns, NVS_READONLY, &h) != ESP_OK)
+            {
+                return;
+            }
+            size_t len = 0;
+            if (nvs_get_blob(h, k_nvs_key, nullptr, &len) == ESP_OK && len % 5 == 0)
+            {
+                blob.resize(len);
+                if (nvs_get_blob(h, k_nvs_key, blob.data(), &len) != ESP_OK)
+                {
+                    blob.clear();
+                }
+            }
+            nvs_close(h);
+        });
     std::lock_guard<std::mutex> lock(mu_);
     int loaded = 0;
     for (size_t i = 0; i + 5 <= blob.size(); i += 5)

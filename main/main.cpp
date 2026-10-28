@@ -39,6 +39,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_heap_caps.h"
 #include "esp_pthread.h"
 #include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
@@ -316,7 +317,8 @@ void start_synch(std::shared_ptr<winject::UpstreamQueue> up)
 
 /* Runs rover_sample on its upstream's queue. Its link loop (2 ms polls) runs
  * on this thread at priority 10; its 250 Hz control task is a FreeRTOS task
- * on core 1 at priority 16, short per cycle (one 14-byte I2C read). */
+ * on core 1 at priority 16, short per cycle (one 14-byte I2C read). Not
+ * inherited: rover_sample sets its own console thread. */
 void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
 {
     static bool started = false;
@@ -332,7 +334,9 @@ void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
     cfg.stack_size = 6 * 1024;
     cfg.prio = 10;
     cfg.thread_name = "rover_sample";
-    cfg.inherit_cfg = true;
+    /* PSRAM stack: internal RAM is what live TX runs short of (rover_sample
+     * moves its NVS access to a short-lived internal-stack thread). */
+    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     esp_pthread_set_cfg(&cfg);
     std::thread(
         [up = std::move(up)]
@@ -374,7 +378,16 @@ esp_err_t start_board_i2c()
     cfg.clk_source = I2C_CLK_SRC_DEFAULT;
     cfg.glitch_ignore_cnt = 7;
     i2c_master_bus_handle_t bus = nullptr;
-    return i2c_new_master_bus(&cfg, &bus);
+    esp_err_t err = i2c_new_master_bus(&cfg, &bus);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    /* A reset during a sensor read (rover_sample reads the IMU at 250 Hz) can
+     * leave the slave holding SDA low; the driver clears the bus only once it
+     * has seen it busy, so the camera's sensor probe failed. Clock it free
+     * (9 SCL pulses and a STOP) before anyone uses the bus. */
+    return i2c_master_bus_reset(bus);
 }
 
 void* run_l3(void*)
