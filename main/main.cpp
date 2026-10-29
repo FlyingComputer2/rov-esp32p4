@@ -12,7 +12,9 @@
 // Upstream 0 is clock sync (krono SynchClient, UDP console 5110) and upstream
 // 2 the bandwidth tester (app_bwtest, UDP console 5100), both on L3-owned
 // queues; the tester's console also takes video_stop / video_start (pause
-// and resume live TX). The radio m-plane stays on UDP loopback.
+// and resume live TX). Upstream 3 is rover_sample (RC car: RC in, telemetry
+// out, MSP v2; UDP console 5120), also on an L3-owned queue. The radio
+// m-plane stays on UDP loopback.
 
 #include <inttypes.h>
 #include <pthread.h>
@@ -32,15 +34,18 @@
 #include "apps/bwtest/Bwtest.h"
 #include "synch/SynchGpio.h"
 #include "core/thread_spawn.hpp"
+#include "driver/i2c_master.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_heap_caps.h"
 #include "esp_pthread.h"
 #include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "rover_sample/rover_sample.hpp"
 #include "vstreamer_idf/live_tx.hpp"
 #include "winject_proxy.h"
 
@@ -98,6 +103,17 @@ constexpr const char* k_bwtest_console = "0.0.0.0:5100";
 constexpr size_t k_synch_upstream = 0;
 constexpr const char* k_synch_console = "0.0.0.0:5110";
 constexpr int k_synch_pulse_gpio = 20;
+
+/* Upstream 3: rover_sample's L3-owned queue (RC from the ground, telemetry
+ * back). Its sensors share the board I2C with the camera SCCB and the codec:
+ * GPIO7 SDA / GPIO8 SCL (header pins 3 / 5, ESP_I2C_SDA / _SCL), board
+ * pull-ups 2.2 k. This file creates the bus before video starts; the camera
+ * source then uses it instead of creating (and on teardown deleting) its own. */
+constexpr size_t k_rover_sample_upstream = 3;
+constexpr const char* k_rover_sample_console = "0.0.0.0:5120";
+constexpr i2c_port_num_t k_board_i2c_port = I2C_NUM_0;
+constexpr int k_board_i2c_sda = 7;
+constexpr int k_board_i2c_scl = 8;
 
 using dp_queue = bfc::reactive_circular_lossy_queue<bfc::shared_sized_buffer>;
 using dp_queue_registry = bfc::cv_reactor_circular_lossy_queue_registry<bfc::shared_sized_buffer>;
@@ -299,6 +315,81 @@ void start_synch(std::shared_ptr<winject::UpstreamQueue> up)
     }
 }
 
+/* Runs rover_sample on its upstream's queue. Its link loop (2 ms polls) runs
+ * on this thread at priority 10; its 250 Hz control task is a FreeRTOS task
+ * on core 1 at priority 16, short per cycle (one 14-byte I2C read). Not
+ * inherited: rover_sample sets its own console thread. */
+void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
+{
+    static bool started = false;
+    if (started)
+    {
+        ESP_LOGW(TAG, "rover_sample upstream replaced; restart to rebind it");
+        return;
+    }
+    started = true;
+    esp_pthread_cfg_t prev {};
+    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.stack_size = 6 * 1024;
+    cfg.prio = 10;
+    cfg.thread_name = "rover_sample";
+    /* PSRAM stack: internal RAM is what live TX runs short of (rover_sample
+     * moves its NVS access to a short-lived internal-stack thread). */
+    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    esp_pthread_set_cfg(&cfg);
+    std::thread(
+        [up = std::move(up)]
+        {
+            rover_sample::config rs;
+            rs.link.send = [up](const uint8_t* data, size_t len) { return up->try_send(data, len); };
+            rs.link.receive = [up](std::vector<uint8_t>* out)
+            {
+                auto packet = up->receive();
+                if (!packet)
+                {
+                    return false;
+                }
+                const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
+                out->assign(p, p + packet->size());
+                return true;
+            };
+            rs.console = k_rover_sample_console;
+            rs.pin.i2c_port = k_board_i2c_port;
+            const int rc = rover_sample::main(rs);
+            printf("ROVER_SAMPLE_EXIT rc=%d\n", rc);
+            fflush(stdout);
+        })
+        .detach();
+    if (had_prev)
+    {
+        esp_pthread_set_cfg(&prev);
+    }
+}
+
+/* The board I2C (camera SCCB, ES8311, rover_sample's GY-521 / GY-271). Kept
+ * for the life of the program. */
+esp_err_t start_board_i2c()
+{
+    i2c_master_bus_config_t cfg = {};
+    cfg.i2c_port = k_board_i2c_port;
+    cfg.sda_io_num = static_cast<gpio_num_t>(k_board_i2c_sda);
+    cfg.scl_io_num = static_cast<gpio_num_t>(k_board_i2c_scl);
+    cfg.clk_source = I2C_CLK_SRC_DEFAULT;
+    cfg.glitch_ignore_cnt = 7;
+    i2c_master_bus_handle_t bus = nullptr;
+    esp_err_t err = i2c_new_master_bus(&cfg, &bus);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    /* A reset during a sensor read (rover_sample reads the IMU at 250 Hz) can
+     * leave the slave holding SDA low; the driver clears the bus only once it
+     * has seen it busy, so the camera's sensor probe failed. Clock it free
+     * (9 SCL pulses and a STOP) before anyone uses the bus. */
+    return i2c_master_bus_reset(bus);
+}
+
 void* run_l3(void*)
 {
     winject::Config cfg;
@@ -313,6 +404,10 @@ void* run_l3(void*)
         else if (index == k_synch_upstream)
         {
             start_synch(std::move(up));
+        }
+        else if (index == k_rover_sample_upstream)
+        {
+            start_rover_sample(std::move(up));
         }
     };
     std::string err;
@@ -439,6 +534,13 @@ extern "C" void app_main(void)
     if (err != ESP_OK)
     {
         printf("ROVER_PROXY_FAILED err=0x%x\n", err);
+    }
+
+    /* Before video: the camera source adopts this bus. */
+    err = start_board_i2c();
+    if (err != ESP_OK)
+    {
+        printf("ROVER_I2C_FAILED err=%s\n", esp_err_to_name(err));
     }
 
     if (queues)
