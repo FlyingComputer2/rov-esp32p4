@@ -520,10 +520,10 @@ extern "C" void app_main(void)
     }
 
     winject_proxy_config_t cfg = WINJECT_PROXY_CONFIG_DEFAULT();
-    /* This board wires the C6's GPIO9 (boot strap) to P4 GPIO22, outside the
-     * LDO-powered GPIO39-48 domain the default (GPIO45, LDO_VO4) assumes. */
-    cfg.link.boot_gpio = 22;
-    cfg.link.boot_gpio_ldo = -1;
+    /* C6 GPIO9 (boot strap) is wired to P4 GPIO47. GPIO46/48 are reserved
+     * for the C6 UART recovery bridge; all three need LDO_VO4 at 3.3 V. */
+    cfg.link.boot_gpio = 47;
+    cfg.link.boot_gpio_ldo = 4;
     if (queues)
     {
         cfg.dplane_tx_queue = k_wifi_tx;
