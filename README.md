@@ -111,14 +111,23 @@ app_bwtest runs on both P4s on upstream 2. Its console is UDP 5100, one command 
 | Command | Effect |
 |---------|--------|
 | `test_send <offer_kbps> <duration_ms>` | Sends 1400-byte datagrams paced at `offer_kbps` for `duration_ms`, in the background (`error busy` while one runs) |
-| `stats` | `snd_pkt`, `snd_byt` (offered), `snd_drop` (offered but never taken by L3: rejected, or evicted from the full queue), `rcv_pkt`, `rcv_byt` |
-| `clr` | Zeroes the counters |
+| `stats` | `snd_pkt`, `snd_byt` (offered), `snd_drop` (offered but never taken by L3: rejected, or evicted from the full queue), `rcv_pkt`, `rcv_byt`; latency: `lat_samples`, `lat_invalid`, `lat_last_us`, `lat_min_us`, `lat_avg_us`, `lat_max_us` |
+| `clr` | Zeroes counters and latency statistics |
 | `video_stop` / `video_start` | Rover only: pauses vstreamer live TX (nothing sent; camera and encoder keep running) / resumes it from a fresh IDR |
 
 ```bash
 echo "test_send 2000 10000" | nc -u -w1 192.168.253.28 5100   # rover -> ground, 2 Mbit/s for 10 s
 echo stats | nc -u -w1 192.168.253.25 5100                    # what the ground received
 ```
+
+Each datagram includes a send timestamp. Receiver `stats` reports last, minimum,
+average and maximum one-way latency in microseconds since `clr`. This measures
+sender queue submission to receiver polling, including L3/FEC/radio queueing and
+the receiver's 10 ms idle polling interval plus scheduler delays. It requires
+synchronized realtime clocks (rover follows ground through krono). Legacy,
+malformed, zero or future timestamps count in `lat_invalid` instead of latency
+samples. Check `lat_samples` before interpreting zero-valued latency fields.
+See [BW test details](https://github.com/winject-wireless/winject-l3/blob/main/docs/bwtest.md).
 
 Air loss is the receiving L3's `lur` `rxgap` on upstream 2; `rx_push_drop` there counts datagrams the tester did not drain in time.
 
