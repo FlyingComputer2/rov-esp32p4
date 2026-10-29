@@ -40,8 +40,8 @@ idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 
 | C6 | P4 | Notes |
 |---|---|---|
-| `U0RXD` / `U0TXD` | GPIO32 / GPIO33 | Same as the Guition (the wires were swapped to match; earlier U0TXD was on GPIO32). Not on GPIO37/38: those are the P4's UART0, shared with the board's USB-UART |
-| `GPIO9` (boot strap) | GPIO22 | `main.cpp` sets `boot_gpio = 22`, no LDO (the proxy default is the Guition's GPIO45 + LDO_VO4) |
+| `U0RXD` / `U0TXD` | GPIO46 / GPIO48 | P4 UART1 TX / RX in the Waveshare recovery bridge; reserved in the normal SDIO application. GPIO37/38 remain the P4's UART0, shared with the board's USB-UART |
+| `GPIO9` (boot strap) | GPIO47 | `main.cpp` sets `boot_gpio = 47`, `boot_gpio_ldo = 4` to power GPIO39–48 at 3.3 V |
 | `CHIP_PU` | GPIO54 | Proxy default |
 | SDIO | slot 1: CLK 18, CMD 19, D0–D3 14–17 | Proxy default |
 
