@@ -29,7 +29,7 @@ FetchContent_Declare(winject_sdio_proxy
 # is declared first wins, so keep their pins equal.
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG b6a5545e5ec4736ab3f4f490db73752ec570c96f
+    GIT_TAG df5de95e9b79d8d99582e2dbae5fd0eabb400cee
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono
