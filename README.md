@@ -70,6 +70,7 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 | 1 | Video (vstreamer live TX) | queues `video_tx` (in) / `video_rx` (out) | c3 / d4 | none: vstreamer's own RS FEC runs end to end |
 | 2 | Bandwidth tester (app_bwtest) | L3-owned queue, handed to the tester by `main/main.cpp` | f6 / e5 | none |
 | 3 | RC car (rover_sample): RC in, telemetry out | L3-owned queue, handed to rover_sample by `main/main.cpp` | 17 / 28 | none: RC repeats every 20 ms |
+| 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | none. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
 
 Only the ids moved: video and the tester kept their buses, so they still pair with an older image on the other board. Sync needs both boards on this layout (an older image counts its frames as `rx_drop_bus`).
 
