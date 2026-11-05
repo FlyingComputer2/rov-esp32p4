@@ -2,7 +2,7 @@
 
 Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP32-C6 on SDIO as the radio). One image runs:
 
-- **winject SDIO proxy** ([winject-radio-esp32-sdio-proxy](https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy)): drives the C6 ([winject-radio-esp32c6](https://github.com/winject-wireless/winject-radio-esp32c6)) and exposes it as a winject radio: m-plane on UDP 22, d-plane on in-process queues, plus HTTP firmware update.
+- **winject SDIO proxy** ([winject-radio-esp32-sdio-proxy](https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy)): drives the C6 ([winject-radio-esp32c6](https://github.com/winject-wireless/winject-radio-esp32c6)) and exposes it as a winject radio: m-plane on UDP 22, d-plane on in-process queues. Its HTTP server (firmware update) is off on this board.
 - **winject-l3** ([winject-l3](https://github.com/winject-wireless/winject-l3), `idf/winject_l3`): winject-manager on a pthread, using that radio (`radio.mplane = 127.0.0.1:22`, `radio.dplane_tx/_rx` queues).
 - **vstreamer** ([vstreamer](https://github.com/FlyingComputer2/vstreamer), `idf/vstreamer`): live TX (`vstreamer::idf::run_live_tx`): OV5647 MIPI-CSI camera → ISP + hardware H.264 (1080p30, 6 Mbit/s) → RTP → `stream_sender` with RS FEC 21/31, into winject-l3's video upstream over queues.
 - **krono** ([FlyingComputer2/krono](https://github.com/FlyingComputer2/krono), `idf/krono`): clock-sync client on upstream 0, an L3-owned queue; the ground P4 is the server and holds the reference clock. UDP console 5110 (see [Clock sync](#clock-sync)).
@@ -34,7 +34,7 @@ Native ESP-IDF v5.5 (`. ~/esp/esp-idf-v5.5.5/export.sh`); P4 USB-UART on the Typ
 idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 ```
 
-`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over HTTP (`curl --data-binary @build/rov-esp32p4.bin http://<P4 IP>/update/p4`); the config partition is not touched by that.
+`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over udp_ota, on Ethernet or over the air (see [App update](#app-update-udp_ota)); an app update does not touch the config partition, but its files can be read and replaced over udp_ota too (`fs-get` / `fs-put`).
 
 ### C6 (Waveshare ESP32-P4-WIFI6-DEV-KIT)
 
@@ -45,7 +45,7 @@ idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 | `CHIP_PU` | GPIO54 | Proxy default |
 | SDIO | slot 1: CLK 18, CMD 19, D0–D3 14–17 | Proxy default |
 
-Update the C6 over SDIO: `curl --data-binary @winject-esp32c6.bin http://<P4 IP>/update/c6`. For a UART flash, put gnd-esp32p4's [`tools/c6-uart-bridge`](https://github.com/FlyingComputer2/gnd-esp32p4/tree/main/tools/c6-uart-bridge) on the P4 with the Waveshare settings. It holds the C6 in its ROM downloader and bridges `/dev/ttyACM0` to the C6 at 115200:
+The proxy's HTTP (`/update/c6`) is off on this board, so the C6 is flashed over its UART: put gnd-esp32p4's [`tools/c6-uart-bridge`](https://github.com/FlyingComputer2/gnd-esp32p4/tree/main/tools/c6-uart-bridge) on the P4 with the Waveshare settings. It holds the C6 in its ROM downloader and bridges `/dev/ttyACM0` to the C6 at 115200:
 
 ```bash
 cd gnd-esp32p4/tools/c6-uart-bridge
@@ -58,11 +58,11 @@ python -m esptool --chip esp32c6 -p /dev/ttyACM0 -b 115200 --before no_reset --a
 
 Opening `/dev/ttyACM0` at 115200 resets the P4.
 
-Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops, `ROVER_VIDEO_EXIT rc=…` if live TX stops (it restarts after 3 s); `live TX paused` / `live TX resumed` on `video_stop` / `video_start`; `live TX …` and `sys cpu …` lines from vstreamer every 10 s; winject-l3 logs its own stats every `winject.stats_sec`.
+Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops, `ROVER_VIDEO_EXIT rc=…` if live TX stops (it restarts after 3 s); `live TX paused` / `live TX resumed` on `set tx pause 1` / `0` (vstreamer m-plane); `ROVER_RELAY_EXIT …` if a console relay stops; `live TX …` and `sys cpu …` lines from vstreamer every 10 s; winject-l3 logs its own stats every `winject.stats_sec`.
 
 ## Config
 
-[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and seven upstreams. The ground P4 carries the same seven, buses swapped. Buses belong to the flow, not the index:
+[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and ten upstreams. The ground P4 carries the same ten, buses swapped. Buses belong to the flow, not the index:
 
 | id | Stream | Rover endpoint | Buses (tx / rx) | Manager FEC |
 |----|--------|----------------|-----------------|-------------|
@@ -73,10 +73,62 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 | 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | none. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
 | 5 | C6 radio m-plane | UDP static `127.0.0.1:2420` → proxy `127.0.0.1:22` | 7c / c7 | none. The ground is UDP server on `0.0.0.0:2420` (buses c7 / 7c) |
 | 6 | Rover vstreamer m-plane | UDP static `127.0.0.1:5092` → vstreamer `127.0.0.1:5090` | 8d / d8 | none. The ground is UDP server on `0.0.0.0:5092` (buses d8 / 8d) |
+| 7 | Bandwidth tester console | L3-owned queue, `mplane_relay` → tester `127.0.0.1:5100` | 4b / b4 | none. The ground serves it on `0.0.0.0:5102` (buses b4 / 4b), several operators at once |
+| 8 | Clock-sync console | L3-owned queue, `mplane_relay` → krono `127.0.0.1:5110` | 5c / c5 | none. The ground serves it on `0.0.0.0:5112` (buses c5 / 5c), several operators at once |
+| 9 | App update and config files (udp_ota) | L3-owned queue, `mplane_relay` → udp_ota `127.0.0.1:3232` | 9e / e9 | none: the tool retransmits. The ground serves it on `0.0.0.0:2430` (buses e9 / 9e), several clients at once |
 
-Existing upstreams keep their ids and buses. Upstreams 5 and 6 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`.
+Existing upstreams keep their ids and buses. Upstreams 7 and 8 carry the tester's and the sync client's consoles, and upstream 9 udp_ota, to the ground through `components/mplane_relay`: the ground gives each operator address a 1-byte client id (air datagram `[id][request]`) and the relay here sends each request to the console from that client's own loopback socket (up to 4, least recently used closed first, 2 min idle), so several operators can use them at once and each reply returns to whoever asked. Upstreams 5 to 9 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`.
 
-The video settings (bitrate, FEC 6/8, `fec_spread_ms` 4; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`, `get sys stats`). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
+The video settings (bitrate, FEC 6/8, `fec_spread_ms` 4; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`, `get sys stats`; `set tx pause 1` pauses live TX, nothing sent while camera and encoder keep running, and `set tx pause 0` resumes it from a fresh IDR). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
+
+## App update (udp_ota)
+
+`components/udp_ota` serves UDP 3232: the new app goes into the inactive OTA slot, and the old one stays bootable. [`tools/udp_ota.py`](tools/udp_ota.py) drives it (Python stdlib only):
+
+```sh
+tools/udp_ota.py <rover IP>:3232 flash build/rov-esp32p4.bin --reboot   # Ethernet
+tools/udp_ota.py <ground IP>:2430 flash build/rov-esp32p4.bin --reboot  # over the air (upstream 9)
+tools/udp_ota.py <addr> status    # running/boot slot, image state, version, build time, ELF SHA, OTA progress
+tools/udp_ota.py <addr> reboot
+```
+
+`flash` sends 1024-byte fragments, keeps up to `--window` (default 8) in flight and retransmits unanswered ones. The reply to the fragment that completes the image carries the verdict: `OK` means the image verified and was set to boot. `--reboot` then boots it and waits until `status` reports the image's ELF SHA. Live TX video pauses while an image comes in, and is restored if the OTA fails, times out (30 s with no request) or finishes without a reboot.
+
+Wire (one message per datagram, little-endian, replies are `type | 0x80` and go to the request's sender; full spec in [`core/wire.hpp`](components/udp_ota/core/wire.hpp)):
+
+| Message | Bytes |
+|---|---|
+| ota_start_request / response | `01 u16 fragment_count` / `81 u16 fragment_count u8 status` |
+| ota_fragment_request / response | `02 u16 fragment data[1..1024]` / `82 u16 fragment u8 status` |
+| reboot_request / response | `03` / `83 u8 status` |
+| status_request / response | `04` / `84 u8 status text` |
+| ota_fs_open_request / response | `05 name[1..30]` / `85 u8 status u32 file_size` |
+| ota_fs_close_request / response | `06` / `86 u8 status` |
+| ota_fs_read_request / response | `07 u32 offset u16 size` / `87 u32 offset u8 status data[0..size]` |
+| ota_fs_write_request / response | `08 u32 offset u16 size data[size]` / `88 u32 offset u16 size u8 status u32 file_size` |
+| ota_fs_truncate_request / response | `09 u32 size` / `89 u8 status u32 file_size` |
+
+Status: 0 OK, 1 EINPROGRESS (another client's OTA is running), 2 EINVAL, 3 ENOENT (no OTA started), 4 EIO (flash), 5 EBADMSG (image rejected), 6 EFBIG (larger than the slot), 7 ENOSPC (file system full). Several clients can use the server at once: `status` and `reboot` work from any client, and one OTA runs at a time. A repeated `ota_start` from the OTA's own client is answered OK, so a lost reply is harmless. Fragments may arrive in any order or more than once, and each 4 KB flash sector is erased on its first write. There is no authentication.
+
+Files: `ota_fs_*` work on one file at a time in the config partition (`/winject`), owned by the client that opened it (others get EINPROGRESS; a file whose owner is quiet for 30 s is closed). `open` creates a missing file empty and returns its size. `read` and `write` take 1 to 1024 bytes at an offset up to the file size: a write overwrites and/or appends, a read is short at the end of the file. `truncate` only shrinks; `close` flushes. Names are `[A-Za-z0-9._-]`, up to 30 characters, no leading `.`; there are no directories. Every request is idempotent, so the tool resends until it gets a reply. The OTA and the open file are independent.
+
+```sh
+tools/udp_ota.py <addr> fs-get winject.conf current.conf    # - (default) prints it
+tools/udp_ota.py <addr> fs-put new.conf winject.conf        # write, truncate, close, read back and compare
+tools/udp_ota.py <addr> reboot                              # winject-l3 reads its config at boot
+```
+
+A broken `winject.conf` stops winject-l3, and with it the air path, at the next boot (`ROVER_L3_CONFIG_FAILED` on serial); udp_ota still answers on Ethernet, so keep a copy (`fs-get`) and fix it from there.
+
+Rollback is unchanged: the new image boots pending, and the proxy confirms it on its first m-plane request (local L3, right after boot). An image that boots far enough to start L3 is kept.
+
+Host tests and a host server, for trying the tool over a lossy path:
+
+```sh
+cmake -S tests -B build-tests && cmake --build build-tests && build-tests/udp_ota_test
+build-tests/udp_ota_host_server 47232 /tmp/out.bin 20 10 /tmp/fs &   # drop 20% of requests, duplicate 10% of replies; files in /tmp/fs
+tools/udp_ota.py 127.0.0.1:47232 flash build/rov-esp32p4.bin
+```
 
 ## Clock sync
 
@@ -116,12 +168,14 @@ app_bwtest runs on both P4s on upstream 2. Its console is UDP 5100, one command 
 | `test_send <offer_kbps> <duration_ms>` | Sends 1400-byte datagrams paced at `offer_kbps` for `duration_ms`, in the background (`error busy` while one runs) |
 | `stats` | `snd_pkt`, `snd_byt` (offered), `snd_drop` (offered but never taken by L3: rejected, or evicted from the full queue), `rcv_pkt`, `rcv_byt`; latency: `lat_samples`, `lat_invalid`, `lat_last_us`, `lat_min_us`, `lat_avg_us`, `lat_max_us` |
 | `clr` | Zeroes counters and latency statistics |
-| `video_stop` / `video_start` | Rover only: pauses vstreamer live TX (nothing sent; camera and encoder keep running) / resumes it from a fresh IDR |
 
 ```bash
 echo "test_send 2000 10000" | nc -u -w1 192.168.253.28 5100   # rover -> ground, 2 Mbit/s for 10 s
 echo stats | nc -u -w1 192.168.253.25 5100                    # what the ground received
+echo stats | nc -u -w1 192.168.253.25 5102                    # the rover's tester, through the ground (upstream 7)
 ```
+
+The rover's clock-sync console is likewise reachable through the ground on UDP 5112 (upstream 8).
 
 Each datagram includes a send timestamp. Receiver `stats` reports last, minimum,
 average and maximum one-way latency in microseconds since `clr`. This measures
@@ -212,7 +266,7 @@ Console: `ROVER_SAMPLE uptime_s=… state=…` (the `status` text) every 10 s; `
 
 Memory: live TX needs the internal RAM. With rover_sample's stacks there (20 KB left) it fell to ~20 fps, so all of rover_sample's stacks are in PSRAM (live TX 29 fps, ~35 KB internal left). NVS access, which writes flash and so needs an internal stack, runs on a short-lived task with its stack in RTC RAM. A `save` stalls the control loop for a few ms (flash write).
 
-Host tests: `cmake -S tests -B build-tests && cmake --build build-tests && build-tests/rover_sample_test`.
+Host tests: `cmake -S tests -B build-tests && cmake --build build-tests && build-tests/rover_sample_test && build-tests/udp_ota_test`.
 
 ## Status
 

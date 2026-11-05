@@ -11,10 +11,12 @@
 //   vstreamer <--video_rx-- winject-l3 upstream 1   (upstream-1.tx)
 // Upstream 0 is clock sync (krono SynchClient, UDP console 5110) and upstream
 // 2 the bandwidth tester (app_bwtest, UDP console 5100), both on L3-owned
-// queues; the tester's console also takes video_stop / video_start (pause
-// and resume live TX). Upstream 3 is rover_sample (RC car: RC in, telemetry
-// out, MSP v2; UDP console 5120), also on an L3-owned queue. The radio
-// m-plane stays on UDP loopback.
+// queues. Upstream 3 is rover_sample (RC car: RC in, telemetry out, MSP v2;
+// UDP console 5120), also on an L3-owned queue. Upstreams 7 and 8 carry the
+// tester's and the clock-sync client's consoles to the ground (mplane_relay,
+// one loopback socket per ground client). The radio m-plane stays on UDP
+// loopback. App updates go over udp_ota (UDP 3232), on Ethernet or over the
+// air through upstream 9; the proxy's HTTP is off.
 
 #include <inttypes.h>
 #include <pthread.h>
@@ -42,10 +44,12 @@
 #include "esp_heap_caps.h"
 #include "esp_pthread.h"
 #include "esp_spiffs.h"
+#include "mplane_relay.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "rover_sample/rover_sample.hpp"
+#include "udp_ota/udp_ota.hpp"
 #include "vstreamer_idf/live_tx.hpp"
 #include "winject_proxy.h"
 
@@ -62,7 +66,7 @@ constexpr size_t k_l3_stack_bytes = 16 * 1024;
 constexpr int k_l3_cpu = 1;
 
 /* Threads winject-l3 starts itself (its upstream reactor, which delivers the
- * L3-owned queues of upstreams 0, 2 and 3). These are the settings they used
+ * L3-owned queues of upstreams 0, 2, 3, 7, 8 and 9). These are the settings they used
  * to get by inheriting the clock-sync client's config, which start_synch()
  * left on the l3 thread; only the name is new. */
 constexpr size_t k_l3_child_stack_bytes = 6 * 1024;
@@ -141,7 +145,8 @@ constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 1
  * spread gave 0-0.7% residual loss at 22-27 fps, 10/12 left 3.8% (3.6 fps)
  * and 15/31 ran core 0 out of time; on channel 1 (~1% loss) every FEC tried
  * was clean. Bitrate (src bitrate), FEC and spread can be changed at run time
- * on the vstreamer m-plane (UDP 5090). */
+ * on the vstreamer m-plane (UDP 5090), where `set tx pause 1` / `0` also
+ * pauses and resumes live TX. */
 constexpr int k_video_mplane_port = 5090;
 
 /* Upstream 2 in config/winject.conf: the bandwidth tester's L3-owned queue. */
@@ -156,12 +161,28 @@ constexpr size_t k_synch_upstream = 0;
 constexpr const char* k_synch_console = "0.0.0.0:5110";
 constexpr int k_synch_pulse_gpio = 20;
 
+/* Upstreams 7 and 8: the tester's and the clock-sync client's consoles over
+ * the air, on L3-owned queues. The ground serves them to operators on UDP
+ * 5102 / 5112 and tags each request with a client id; mplane_relay sends it
+ * from that client's own loopback socket, so the reply finds its way back. */
+constexpr size_t k_bwtest_mplane_upstream = 7;
+constexpr const char* k_bwtest_mplane_target = "127.0.0.1:5100";
+constexpr size_t k_synch_mplane_upstream = 8;
+constexpr const char* k_synch_mplane_target = "127.0.0.1:5110";
+/* Upstream 9: udp_ota over the air, relayed the same way (ground UDP 2430). */
+constexpr size_t k_ota_upstream = 9;
+constexpr const char* k_ota_target = "127.0.0.1:3232";
+
 /* Upstream 3: rover_sample's L3-owned queue (RC from the ground, telemetry
  * back). Its sensors share the board I2C with the camera SCCB and the codec:
  * GPIO7 SDA / GPIO8 SCL (header pins 3 / 5, ESP_I2C_SDA / _SCL), board
  * pull-ups 2.2 k. This file creates the bus before video starts; the camera
  * source then uses it instead of creating (and on teardown deleting) its own. */
 constexpr size_t k_rover_sample_upstream = 3;
+
+/* udp_ota: tools/udp_ota.py <rover IP>:3232 on Ethernet; over the air the
+ * ground's UDP 2430 reaches it through upstream 9 (config/winject.conf). */
+constexpr uint16_t k_ota_port = 3232;
 constexpr const char* k_rover_sample_console = "0.0.0.0:5120";
 constexpr i2c_port_num_t k_board_i2c_port = I2C_NUM_0;
 constexpr int k_board_i2c_sda = 7;
@@ -255,21 +276,31 @@ esp_err_t mount_config()
     return esp_vfs_spiffs_register(&conf);
 }
 
-/* video_stop / video_start: pause and resume live TX (live_tx_config::
- * pause_request). Camera and encoder keep running; a real stop could not
- * restart, the 1080p encoder cannot be reopened after a run. */
+/* Live TX pause (live_tx_config::pause): set over the vstreamer m-plane
+ * (`set tx pause 1|0`, UDP 5090). Owned here so it survives a live TX
+ * restart. */
 std::atomic<bool> g_video_pause {false};
 
-std::string video_stop_command(const std::string&)
+/* App update server. Video pauses while an image comes in (it would take
+ * most of the airtime) and goes back to what it was when the OTA ends
+ * without a reboot (failure, timeout, or done but not rebooted yet). */
+esp_err_t start_ota()
 {
-    g_video_pause.store(true);
-    return "ok\n";
-}
-
-std::string video_start_command(const std::string&)
-{
-    g_video_pause.store(false);
-    return "ok\n";
+    udp_ota::config cfg;
+    cfg.port = k_ota_port;
+    cfg.on_active = [](bool active)
+    {
+        static bool paused_before = false;
+        if (active)
+        {
+            paused_before = g_video_pause.exchange(true);
+        }
+        else
+        {
+            g_video_pause.store(paused_before);
+        }
+    };
+    return udp_ota::start(cfg);
 }
 
 /* Runs app_bwtest on its upstream's queue. Its sender and receive poller
@@ -290,8 +321,6 @@ void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
             app_bwtest::Config bw;
             bw.upstream = up;
             bw.console = k_bwtest_console;
-            bw.commands = {{"video_stop", video_stop_command},
-                           {"video_start", video_start_command}};
             const int rc = app_bwtest::main(bw);
             printf("ROVER_BWTEST_EXIT rc=%d\n", rc);
             fflush(stdout);
@@ -388,6 +417,45 @@ void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
         .detach();
 }
 
+/* Relays a local console over its upstream's queue (mplane_relay). Low
+ * priority and unpinned like the tester: m-plane traffic is a few datagrams
+ * per operator command, and a 5 ms poll costs video nothing; an OTA (video
+ * paused) is the only bulk user. */
+void start_mplane_relay(size_t index, std::shared_ptr<winject::UpstreamQueue> up,
+                        const char* name, const char* target)
+{
+    static std::atomic<uint32_t> started {0};
+    const uint32_t bit = 1u << index;
+    if (started.fetch_or(bit) & bit)
+    {
+        ESP_LOGW(TAG, "%s upstream replaced; restart to rebind the relay", name);
+        return;
+    }
+    const scoped_pthread_cfg scope(thread_cfg(name, 4 * 1024, 5, false));
+    std::thread(
+        [up = std::move(up), name, target]
+        {
+            mplane_relay::ClientConfig rc;
+            rc.send = [up](const uint8_t* data, size_t len) { return up->try_send(data, len); };
+            rc.receive = [up](std::vector<uint8_t>* out)
+            {
+                auto packet = up->receive();
+                if (!packet)
+                {
+                    return false;
+                }
+                const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
+                out->assign(p, p + packet->size());
+                return true;
+            };
+            rc.target = target;
+            const int rc_exit = mplane_relay::client_main(rc);
+            printf("ROVER_RELAY_EXIT %s rc=%d\n", name, rc_exit);
+            fflush(stdout);
+        })
+        .detach();
+}
+
 /* The board I2C (camera SCCB, ES8311, rover_sample's GY-521 / GY-271). Kept
  * for the life of the program. */
 esp_err_t start_board_i2c()
@@ -434,6 +502,18 @@ void* run_l3(void*)
         else if (index == k_rover_sample_upstream)
         {
             start_rover_sample(std::move(up));
+        }
+        else if (index == k_bwtest_mplane_upstream)
+        {
+            start_mplane_relay(index, std::move(up), "bw_relay", k_bwtest_mplane_target);
+        }
+        else if (index == k_synch_mplane_upstream)
+        {
+            start_mplane_relay(index, std::move(up), "synch_relay", k_synch_mplane_target);
+        }
+        else if (index == k_ota_upstream)
+        {
+            start_mplane_relay(index, std::move(up), "ota_relay", k_ota_target);
         }
     };
     std::string err;
@@ -510,7 +590,7 @@ vstreamer::idf::live_tx_config video_config()
 void run_video()
 {
     vstreamer::idf::live_tx_config cfg = video_config();
-    cfg.pause_request = &g_video_pause;
+    cfg.pause = &g_video_pause;
     for (;;)
     {
         const int rc = vstreamer::idf::run_live_tx(cfg);
@@ -546,8 +626,8 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Ethernet: %s", esp_err_to_name(err));
     }
 
-    /* Without the queues the proxy still starts (UDP d-plane), so POST
-     * /update/p4 can replace this image; winject-l3 and video stay off. */
+    /* Without the queues the proxy still starts (UDP d-plane) and udp_ota
+     * can replace this image over Ethernet; winject-l3 and video stay off. */
     const bool queues = start_dplane_queues();
     if (!queues)
     {
@@ -559,6 +639,8 @@ extern "C" void app_main(void)
      * for the C6 UART recovery bridge; all three need LDO_VO4 at 3.3 V. */
     cfg.link.boot_gpio = 47;
     cfg.link.boot_gpio_ldo = 4;
+    /* No HTTP: the app is updated over udp_ota, the C6 over its UART. */
+    cfg.http_port = 0;
     if (queues)
     {
         cfg.dplane_tx_queue = k_wifi_tx;
@@ -571,6 +653,21 @@ extern "C" void app_main(void)
         printf("ROVER_PROXY_FAILED err=0x%x\n", err);
     }
 
+    /* Before udp_ota, which serves its files (ota_fs_*), and whatever the
+     * queues did: a broken winject.conf can then still be replaced over
+     * Ethernet. */
+    const esp_err_t config_err = mount_config();
+    if (config_err != ESP_OK)
+    {
+        printf("ROVER_CONFIG_FAILED err=%s\n", esp_err_to_name(config_err));
+    }
+
+    err = start_ota();
+    if (err != ESP_OK)
+    {
+        printf("ROVER_OTA_FAILED err=%s\n", esp_err_to_name(err));
+    }
+
     /* Before video: the camera source adopts this bus. */
     err = start_board_i2c();
     if (err != ESP_OK)
@@ -580,12 +677,7 @@ extern "C" void app_main(void)
 
     if (queues)
     {
-        err = mount_config();
-        if (err != ESP_OK)
-        {
-            printf("ROVER_CONFIG_FAILED err=%s\n", esp_err_to_name(err));
-        }
-        else
+        if (config_err == ESP_OK)
         {
             start_l3();
         }
