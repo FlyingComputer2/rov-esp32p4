@@ -62,7 +62,7 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 
 ## Config
 
-[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and six upstreams. The ground P4 carries the same six, buses swapped. Buses belong to the flow, not the index:
+[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and seven upstreams. The ground P4 carries the same seven, buses swapped. Buses belong to the flow, not the index:
 
 | id | Stream | Rover endpoint | Buses (tx / rx) | Manager FEC |
 |----|--------|----------------|-----------------|-------------|
@@ -72,10 +72,11 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 | 3 | RC car (rover_sample): RC in, telemetry out | L3-owned queue, handed to rover_sample by `main/main.cpp` | 17 / 28 | none: RC repeats every 20 ms |
 | 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | none. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
 | 5 | C6 radio m-plane | UDP static `127.0.0.1:2420` → proxy `127.0.0.1:22` | 7c / c7 | none. The ground is UDP server on `0.0.0.0:2420` (buses c7 / 7c) |
+| 6 | Rover vstreamer m-plane | UDP static `127.0.0.1:5092` → vstreamer `127.0.0.1:5090` | 8d / d8 | none. The ground is UDP server on `0.0.0.0:5092` (buses d8 / 8d) |
 
-Existing upstreams keep their ids and buses. Upstream 5 only pairs when both boards run this layout; an older image counts its frames as `rx_drop_bus`.
+Existing upstreams keep their ids and buses. Upstreams 5 and 6 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`.
 
-The video settings (bitrate, FEC 21/31, `fec_spread_ms` 75; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed at run time on the vstreamer m-plane, UDP 5090 (`get/set src|pay|snd <key>`, `get sys stats`). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 therefore lets a ground-side client change the rover radio's channel, power and modulation or reset it; use only on the trusted domain/link.
+The video settings (bitrate, FEC 6/8, `fec_spread_ms` 4; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`, `get sys stats`). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
 
 ## Clock sync
 
