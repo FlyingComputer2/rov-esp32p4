@@ -58,7 +58,7 @@ python -m esptool --chip esp32c6 -p /dev/ttyACM0 -b 115200 --before no_reset --a
 
 Opening `/dev/ttyACM0` at 115200 resets the P4.
 
-Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops, `ROVER_VIDEO_EXIT rc=…` if live TX stops (it restarts after 3 s); `live TX paused` / `live TX resumed` on `video_stop` / `video_start`; `live TX …` and `sys cpu …` lines from vstreamer every 10 s; winject-l3 logs its own stats every `winject.stats_sec`.
+Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER_READY`, `ROVER_PROXY_STATS …` every 10 s, `ROVER_L3_EXIT rc=…` if the manager stops, `ROVER_VIDEO_EXIT rc=…` if live TX stops (it restarts after 3 s); `live TX paused` / `live TX resumed` on `set tx pause 1` / `0` (vstreamer m-plane); `ROVER_RELAY_EXIT …` if a console relay stops; `live TX …` and `sys cpu …` lines from vstreamer every 10 s; winject-l3 logs its own stats every `winject.stats_sec`.
 
 ## Config
 
@@ -73,10 +73,12 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 | 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | none. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
 | 5 | C6 radio m-plane | UDP static `127.0.0.1:2420` → proxy `127.0.0.1:22` | 7c / c7 | none. The ground is UDP server on `0.0.0.0:2420` (buses c7 / 7c) |
 | 6 | Rover vstreamer m-plane | UDP static `127.0.0.1:5092` → vstreamer `127.0.0.1:5090` | 8d / d8 | none. The ground is UDP server on `0.0.0.0:5092` (buses d8 / 8d) |
+| 7 | Bandwidth tester console | L3-owned queue, `mplane_relay` → tester `127.0.0.1:5100` | 4b / b4 | none. The ground serves it on `0.0.0.0:5102` (buses b4 / 4b), several operators at once |
+| 8 | Clock-sync console | L3-owned queue, `mplane_relay` → krono `127.0.0.1:5110` | 5c / c5 | none. The ground serves it on `0.0.0.0:5112` (buses c5 / 5c), several operators at once |
 
-Existing upstreams keep their ids and buses. Upstreams 5 and 6 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`.
+Existing upstreams keep their ids and buses. Upstreams 7 and 8 carry the tester's and the sync client's consoles to the ground through `components/mplane_relay`: the ground gives each operator address a 1-byte client id (air datagram `[id][request]`) and the relay here sends each request to the console from that client's own loopback socket (up to 4, least recently used closed first, 2 min idle), so several operators can use them at once and each reply returns to whoever asked. Upstreams 5 and 6 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`.
 
-The video settings (bitrate, FEC 6/8, `fec_spread_ms` 4; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`, `get sys stats`). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
+The video settings (bitrate, FEC 6/8, `fec_spread_ms` 4; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`, `get sys stats`; `set tx pause 1` pauses live TX, nothing sent while camera and encoder keep running, and `set tx pause 0` resumes it from a fresh IDR). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
 
 ## Clock sync
 
@@ -116,12 +118,14 @@ app_bwtest runs on both P4s on upstream 2. Its console is UDP 5100, one command 
 | `test_send <offer_kbps> <duration_ms>` | Sends 1400-byte datagrams paced at `offer_kbps` for `duration_ms`, in the background (`error busy` while one runs) |
 | `stats` | `snd_pkt`, `snd_byt` (offered), `snd_drop` (offered but never taken by L3: rejected, or evicted from the full queue), `rcv_pkt`, `rcv_byt`; latency: `lat_samples`, `lat_invalid`, `lat_last_us`, `lat_min_us`, `lat_avg_us`, `lat_max_us` |
 | `clr` | Zeroes counters and latency statistics |
-| `video_stop` / `video_start` | Rover only: pauses vstreamer live TX (nothing sent; camera and encoder keep running) / resumes it from a fresh IDR |
 
 ```bash
 echo "test_send 2000 10000" | nc -u -w1 192.168.253.28 5100   # rover -> ground, 2 Mbit/s for 10 s
 echo stats | nc -u -w1 192.168.253.25 5100                    # what the ground received
+echo stats | nc -u -w1 192.168.253.25 5102                    # the rover's tester, through the ground (upstream 7)
 ```
+
+The rover's clock-sync console is likewise reachable through the ground on UDP 5112 (upstream 8).
 
 Each datagram includes a send timestamp. Receiver `stats` reports last, minimum,
 average and maximum one-way latency in microseconds since `clr`. This measures
