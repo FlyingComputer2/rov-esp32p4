@@ -61,6 +61,56 @@ constexpr size_t k_l3_stack_bytes = 16 * 1024;
 /* Core for the winject-l3 thread; see start_l3(). */
 constexpr int k_l3_cpu = 1;
 
+/* Threads winject-l3 starts itself (its upstream reactor, which delivers the
+ * L3-owned queues of upstreams 0, 2 and 3). These are the settings they used
+ * to get by inheriting the clock-sync client's config, which start_synch()
+ * left on the l3 thread; only the name is new. */
+constexpr size_t k_l3_child_stack_bytes = 6 * 1024;
+constexpr int k_l3_child_prio = 12;
+
+/* esp_pthread_set_cfg() applies to every thread the calling thread creates
+ * next. Sets cfg for this scope, then restores the previous config, or the
+ * default when there was none, so it cannot leak into the caller's later
+ * threads. */
+class scoped_pthread_cfg
+{
+public:
+    explicit scoped_pthread_cfg(const esp_pthread_cfg_t& cfg)
+        : had_prev(esp_pthread_get_cfg(&prev) == ESP_OK)
+    {
+        esp_pthread_set_cfg(&cfg);
+    }
+    ~scoped_pthread_cfg()
+    {
+        if (had_prev)
+        {
+            esp_pthread_set_cfg(&prev);
+        }
+        else
+        {
+            const esp_pthread_cfg_t def = esp_pthread_get_default_config();
+            esp_pthread_set_cfg(&def);
+        }
+    }
+    scoped_pthread_cfg(const scoped_pthread_cfg&) = delete;
+    scoped_pthread_cfg& operator=(const scoped_pthread_cfg&) = delete;
+
+private:
+    esp_pthread_cfg_t prev {};
+    bool had_prev;
+};
+
+/* The default config with a name, stack, priority and inheritance. Unpinned. */
+esp_pthread_cfg_t thread_cfg(const char* name, size_t stack, int prio, bool inherit)
+{
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.thread_name = name;
+    cfg.stack_size = stack;
+    cfg.prio = prio;
+    cfg.inherit_cfg = inherit;
+    return cfg;
+}
+
 /* Registry names; config/winject.conf names the same ones. */
 constexpr const char* k_dp_reactor = "rover_dp";
 constexpr const char* k_wifi_tx = "wifi_tx";
@@ -233,14 +283,7 @@ void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
         return;
     }
     started = true;
-    esp_pthread_cfg_t prev {};
-    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
-    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
-    cfg.stack_size = 6 * 1024;
-    cfg.prio = 5;
-    cfg.thread_name = "bwtest";
-    cfg.inherit_cfg = true;
-    esp_pthread_set_cfg(&cfg);
+    const scoped_pthread_cfg scope(thread_cfg("bwtest", 6 * 1024, 5, true));
     std::thread(
         [up = std::move(up)]
         {
@@ -254,10 +297,6 @@ void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
             fflush(stdout);
         })
         .detach();
-    if (had_prev)
-    {
-        esp_pthread_set_cfg(&prev);
-    }
 }
 
 /* krono's datagram transport over an L3-owned upstream queue. */
@@ -291,14 +330,7 @@ void start_synch(std::shared_ptr<winject::UpstreamQueue> up)
         return;
     }
     started = true;
-    esp_pthread_cfg_t prev {};
-    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
-    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
-    cfg.stack_size = 6 * 1024;
-    cfg.prio = 12;
-    cfg.thread_name = "synch";
-    cfg.inherit_cfg = true;
-    esp_pthread_set_cfg(&cfg);
+    const scoped_pthread_cfg scope(thread_cfg("synch", 6 * 1024, 12, true));
     std::thread(
         [up = std::move(up)]
         {
@@ -311,10 +343,6 @@ void start_synch(std::shared_ptr<winject::UpstreamQueue> up)
             fflush(stdout);
         })
         .detach();
-    if (had_prev)
-    {
-        esp_pthread_set_cfg(&prev);
-    }
 }
 
 /* Runs rover_sample on its upstream's queue. Its link loop (2 ms polls) runs
@@ -330,16 +358,11 @@ void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
         return;
     }
     started = true;
-    esp_pthread_cfg_t prev {};
-    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
-    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
-    cfg.stack_size = 6 * 1024;
-    cfg.prio = 10;
-    cfg.thread_name = "rover_sample";
+    esp_pthread_cfg_t cfg = thread_cfg("rover_sample", 6 * 1024, 10, false);
     /* PSRAM stack: internal RAM is what live TX runs short of (rover_sample
      * moves its NVS access to a short-lived internal-stack thread). */
     cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    esp_pthread_set_cfg(&cfg);
+    const scoped_pthread_cfg scope(cfg);
     std::thread(
         [up = std::move(up)]
         {
@@ -363,10 +386,6 @@ void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
             fflush(stdout);
         })
         .detach();
-    if (had_prev)
-    {
-        esp_pthread_set_cfg(&prev);
-    }
 }
 
 /* The board I2C (camera SCCB, ES8311, rover_sample's GY-521 / GY-271). Kept
@@ -394,6 +413,11 @@ esp_err_t start_board_i2c()
 
 void* run_l3(void*)
 {
+    /* For the threads winject-l3 starts; the upstream callbacks below set
+     * their own for their threads and restore this one. */
+    const esp_pthread_cfg_t child =
+        thread_cfg("l3_up", k_l3_child_stack_bytes, k_l3_child_prio, true);
+    esp_pthread_set_cfg(&child);
     winject::Config cfg;
     /* Set before load(): its validation needs the callback for an L3-owned
      * queue upstream. */
@@ -433,11 +457,9 @@ void* run_l3(void*)
  * went seconds without an answer while core 1 sat ~58% idle. */
 void start_l3()
 {
-    esp_pthread_cfg_t prev {};
-    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
     esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
     cfg.pin_to_core = k_l3_cpu;
-    esp_pthread_set_cfg(&cfg);
+    const scoped_pthread_cfg scope(cfg);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, k_l3_stack_bytes);
@@ -445,16 +467,6 @@ void start_l3()
     pthread_t t;
     const int err = pthread_create(&t, &attr, run_l3, nullptr);
     pthread_attr_destroy(&attr);
-    /* esp_pthread_set_cfg() applies to every thread app_main creates next. */
-    if (had_prev)
-    {
-        esp_pthread_set_cfg(&prev);
-    }
-    else
-    {
-        const esp_pthread_cfg_t def = esp_pthread_get_default_config();
-        esp_pthread_set_cfg(&def);
-    }
     if (err != 0)
     {
         ESP_LOGE(TAG, "winject-l3 thread: %d", err);
