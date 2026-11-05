@@ -28,7 +28,7 @@ target_link_libraries(mplane_relay_test PRIVATE Threads::Threads)
 # udp_ota core: unit tests, and a host server for tools/udp_ota.py.
 set(OTA_CORE ${CMAKE_CURRENT_LIST_DIR}/../components/udp_ota/core)
 foreach(t udp_ota_test udp_ota_host_server)
-    add_executable(${t} ${t}.cpp ${OTA_CORE}/server.cpp)
+    add_executable(${t} ${t}.cpp ${OTA_CORE}/server.cpp ${OTA_CORE}/fs.cpp)
     target_include_directories(${t} PRIVATE ${OTA_CORE})
     target_compile_options(${t} PRIVATE -Wall -Wextra -Werror -fsanitize=address,undefined)
     target_link_options(${t} PRIVATE -fsanitize=address,undefined)

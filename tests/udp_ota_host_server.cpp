@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "fs.hpp"
 #include "server.hpp"
 
 using namespace udp_ota;
@@ -63,14 +64,15 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        std::fprintf(stderr, "usage: %s <port> <out file> [drop_pct] [dup_pct]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <port> <out file> [drop_pct] [dup_pct] [fs dir]\n", argv[0]);
         return 2;
     }
     const int drop = argc > 3 ? std::atoi(argv[3]) : 0;
     const int dup = argc > 4 ? std::atoi(argv[4]) : 0;
     file_flash flash;
     flash.path = argv[2];
-    server srv(flash, 30000);
+    posix_file_store files(argc > 5 ? argv[5] : "");
+    server srv(flash, 30000, {}, argc > 5 ? &files : nullptr);
     const int fd = socket(AF_INET, SOCK_DGRAM, 0);
     sockaddr_in addr {};
     addr.sin_family = AF_INET;

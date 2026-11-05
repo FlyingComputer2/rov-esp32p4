@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "fs.hpp"
 #include "wire.hpp"
 
 namespace udp_ota
@@ -48,11 +49,14 @@ public:
     // on_active(true) when an OTA starts, (false) when it completes, fails or
     // times out. idle_timeout_ms: an active OTA with no request from its
     // owner for this long is aborted.
-    server(backend& flash, uint32_t idle_timeout_ms, std::function<void(bool)> on_active = {});
+    // files: the ota_fs_* directory; nullptr = those requests get ENOENT. The
+    // idle timeout also closes a file whose owner went quiet.
+    server(backend& flash, uint32_t idle_timeout_ms, std::function<void(bool)> on_active = {},
+           file_store* files = nullptr);
 
     // Handles one datagram. Returns the reply length in reply (0 = no
     // reply). reply must hold at least k_reply_max bytes.
-    static constexpr size_t k_reply_max = 256;
+    static constexpr size_t k_reply_max = 8 + k_fragment_size;  // fs read: 6 + data
     size_t handle(const uint8_t* req, size_t len, const peer& from, uint32_t now_ms, uint8_t* reply);
 
     // Call periodically (and before handle) for the idle timeout.
@@ -69,6 +73,8 @@ private:
     size_t on_start(const uint8_t* req, size_t len, const peer& from, uint32_t now_ms, uint8_t* reply);
     size_t on_fragment(const uint8_t* req, size_t len, const peer& from, uint32_t now_ms, uint8_t* reply);
     size_t on_status(uint8_t* reply);
+    size_t on_fs(const uint8_t* req, size_t len, const peer& from, uint32_t now_ms, uint8_t* reply);
+    void fs_close_idle(uint32_t now_ms);
     void end_active(state next);
 
     backend& m_flash;
@@ -82,6 +88,13 @@ private:
     uint32_t m_last_len = 0;
     std::vector<bool> m_have;
     bool m_reboot = false;
+
+    file_store* m_files;
+    bool m_fs_open = false;
+    peer m_fs_owner;
+    std::string m_fs_name;
+    uint32_t m_fs_size = 0;
+    uint32_t m_fs_last_ms = 0;
 };
 
 }  // namespace udp_ota

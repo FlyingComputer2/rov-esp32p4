@@ -188,9 +188,10 @@ void server_task(void* arg)
 {
     auto* a = static_cast<task_args*>(arg);
     ota_slot slot;
-    server srv(slot, a->cfg.idle_timeout_ms, a->cfg.on_active);
+    posix_file_store files(a->cfg.fs_dir);
+    server srv(slot, a->cfg.idle_timeout_ms, a->cfg.on_active, a->cfg.fs_dir.empty() ? nullptr : &files);
     static uint8_t req[1600];
-    uint8_t reply[server::k_reply_max];
+    static uint8_t reply[server::k_reply_max];
     for (;;)
     {
         sockaddr_in from {};

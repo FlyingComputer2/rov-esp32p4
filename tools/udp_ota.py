@@ -4,6 +4,8 @@
   udp_ota.py <host:port> status
   udp_ota.py <host:port> reboot
   udp_ota.py <host:port> flash <app.bin> [--reboot] [--window N]
+  udp_ota.py <host:port> fs-get <name> [<local file>|-]
+  udp_ota.py <host:port> fs-put <local file> <name>
 
 Rover over Ethernet: <rover IP>:3232. Rover over the air: <ground IP>:2430
 (ground L3 upstream 9 -> air -> rover upstream 9 -> 127.0.0.1:3232).
@@ -11,7 +13,10 @@ flash sends the image as 1024-byte fragments with up to --window in flight
 and retransmits unanswered ones; the reply to the fragment that completes the
 image says whether the P4 accepted it. With --reboot it then boots the image
 and waits until the P4 answers status with the new image's ELF SHA.
-Python stdlib only.
+fs-get / fs-put read and write one file in the P4's config partition
+(/winject, e.g. winject.conf); fs-put overwrites the file, truncates it to
+the new length, closes it and reads it back to verify. A changed config takes
+effect on the next boot (reboot). Python stdlib only.
 """
 
 import argparse
@@ -23,8 +28,9 @@ import time
 
 FRAGMENT = 1024
 START, FRAGMENT_REQ, REBOOT, STATUS = 0x01, 0x02, 0x03, 0x04
+FS_OPEN, FS_CLOSE, FS_READ, FS_WRITE, FS_TRUNCATE = 0x05, 0x06, 0x07, 0x08, 0x09
 RESP = 0x80
-STATUS_NAMES = ["OK", "EINPROGRESS", "EINVAL", "ENOENT", "EIO", "EBADMSG", "EFBIG"]
+STATUS_NAMES = ["OK", "EINPROGRESS", "EINVAL", "ENOENT", "EIO", "EBADMSG", "EFBIG", "ENOSPC"]
 
 
 def status_name(code):
@@ -104,6 +110,79 @@ class Client:
         r = self.request(bytes([REBOOT]), REBOOT | RESP, tries=5)
         if r[1] != 0:
             raise OtaError("reboot: %s" % status_name(r[1]))
+
+    # ota_fs_*: one request at a time, each resent until its reply arrives
+    # (all are idempotent). Replies are matched by type and offset.
+    def _fs(self, msg, want_type, match=None, tries=20, timeout=1.0):
+        for _ in range(tries):
+            self.sock.sendto(msg, self.addr)
+            deadline = time.monotonic() + timeout
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                data = self.recv(left)
+                if data and data[0] == want_type and (match is None or match(data)):
+                    return data
+        raise OtaError("no reply from %s:%d" % self.addr)
+
+    def fs_open(self, name):
+        r = self._fs(bytes([FS_OPEN]) + name.encode(), FS_OPEN | RESP)
+        if len(r) < 6 or r[1] != 0:
+            raise OtaError("open %s: %s" % (name, status_name(r[1] if len(r) > 1 else 255)))
+        return struct.unpack_from("<I", r, 2)[0]
+
+    def fs_close(self):
+        r = self._fs(bytes([FS_CLOSE]), FS_CLOSE | RESP)
+        if r[1] != 0:
+            raise OtaError("close: %s" % status_name(r[1]))
+
+    def fs_read_all(self, size):
+        out = bytearray()
+        while len(out) < size:
+            off = len(out)
+            want = min(FRAGMENT, size - off)
+            r = self._fs(struct.pack("<BIH", FS_READ, off, want), FS_READ | RESP,
+                         lambda d, off=off: len(d) >= 6 and struct.unpack_from("<I", d, 1)[0] == off)
+            if r[5] != 0:
+                raise OtaError("read at %d: %s" % (off, status_name(r[5])))
+            if len(r) == 6:
+                break  # the file got shorter
+            out += r[6:]
+        return bytes(out)
+
+    def fs_write(self, off, data):
+        r = self._fs(struct.pack("<BIH", FS_WRITE, off, len(data)) + data, FS_WRITE | RESP,
+                     lambda d: len(d) >= 12 and struct.unpack_from("<I", d, 1)[0] == off)
+        if r[7] != 0:
+            raise OtaError("write at %d: %s" % (off, status_name(r[7])))
+
+    def fs_truncate(self, size):
+        r = self._fs(struct.pack("<BI", FS_TRUNCATE, size), FS_TRUNCATE | RESP)
+        if r[1] != 0:
+            raise OtaError("truncate to %d: %s" % (size, status_name(r[1])))
+
+    def fs_get(self, name):
+        size = self.fs_open(name)
+        try:
+            return self.fs_read_all(size)
+        finally:
+            self.fs_close()
+
+    def fs_put(self, name, data, log=print):
+        old = self.fs_open(name)
+        try:
+            # In order: a write may start at most at the current end.
+            for off in range(0, len(data), FRAGMENT):
+                self.fs_write(off, data[off : off + FRAGMENT])
+            if old > len(data):
+                self.fs_truncate(len(data))
+            back = self.fs_read_all(len(data))
+        finally:
+            self.fs_close()
+        if back != data:
+            raise OtaError("%s: read-back differs from what was written" % name)
+        log("%s: %d B written (was %d B), verified" % (name, len(data), old))
 
     def flash(self, image, window, log=print):
         count = (len(image) + FRAGMENT - 1) // FRAGMENT
@@ -195,6 +274,12 @@ def main():
     fl.add_argument("--window", type=int, default=8, help="fragments in flight (default 8)")
     fl.add_argument("--reboot", action="store_true", help="boot the new image and wait for it")
     fl.add_argument("--boot-timeout", type=int, default=90)
+    fg = sub.add_parser("fs-get", help="read a file from the config partition")
+    fg.add_argument("name")
+    fg.add_argument("local", nargs="?", default="-", help="output file, - = stdout (default)")
+    fp = sub.add_parser("fs-put", help="replace a file in the config partition")
+    fp.add_argument("local")
+    fp.add_argument("name")
     args = ap.parse_args()
 
     client = Client(parse_addr(args.addr))
@@ -204,6 +289,17 @@ def main():
         elif args.cmd == "reboot":
             client.reboot()
             print("rebooting")
+        elif args.cmd == "fs-get":
+            data = client.fs_get(args.name)
+            if args.local == "-":
+                sys.stdout.buffer.write(data)
+            else:
+                with open(args.local, "wb") as f:
+                    f.write(data)
+                print("%s: %d B" % (args.name, len(data)), file=sys.stderr)
+        elif args.cmd == "fs-put":
+            with open(args.local, "rb") as f:
+                client.fs_put(args.name, f.read())
         else:
             with open(args.image, "rb") as f:
                 image = f.read()

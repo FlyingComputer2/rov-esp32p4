@@ -34,7 +34,7 @@ Native ESP-IDF v5.5 (`. ~/esp/esp-idf-v5.5.5/export.sh`); P4 USB-UART on the Typ
 idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
 ```
 
-`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over udp_ota, on Ethernet or over the air (see [App update](#app-update-udp_ota)); the config partition is not touched by that.
+`idf.py flash` also writes the SPIFFS partition built from [`config/`](config), mounted at `/winject`; winject-l3 reads `/winject/winject.conf`. After the first flash, update the app over udp_ota, on Ethernet or over the air (see [App update](#app-update-udp_ota)); an app update does not touch the config partition, but its files can be read and replaced over udp_ota too (`fs-get` / `fs-put`).
 
 ### C6 (Waveshare ESP32-P4-WIFI6-DEV-KIT)
 
@@ -62,7 +62,7 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 
 ## Config
 
-[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and eight upstreams. The ground P4 carries the same eight, buses swapped. Buses belong to the flow, not the index:
+[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 15 dBm, domain 0xB00B), manager console on UDP 2400, and ten upstreams. The ground P4 carries the same ten, buses swapped. Buses belong to the flow, not the index:
 
 | id | Stream | Rover endpoint | Buses (tx / rx) | Manager FEC |
 |----|--------|----------------|-----------------|-------------|
@@ -102,8 +102,23 @@ Wire (one message per datagram, little-endian, replies are `type | 0x80` and go 
 | ota_fragment_request / response | `02 u16 fragment data[1..1024]` / `82 u16 fragment u8 status` |
 | reboot_request / response | `03` / `83 u8 status` |
 | status_request / response | `04` / `84 u8 status text` |
+| ota_fs_open_request / response | `05 name[1..30]` / `85 u8 status u32 file_size` |
+| ota_fs_close_request / response | `06` / `86 u8 status` |
+| ota_fs_read_request / response | `07 u32 offset u16 size` / `87 u32 offset u8 status data[0..size]` |
+| ota_fs_write_request / response | `08 u32 offset u16 size data[size]` / `88 u32 offset u16 size u8 status u32 file_size` |
+| ota_fs_truncate_request / response | `09 u32 size` / `89 u8 status u32 file_size` |
 
-Status: 0 OK, 1 EINPROGRESS (another client's OTA is running), 2 EINVAL, 3 ENOENT (no OTA started), 4 EIO (flash), 5 EBADMSG (image rejected), 6 EFBIG (larger than the slot). Several clients can use the server at once: `status` and `reboot` work from any client, and one OTA runs at a time. A repeated `ota_start` from the OTA's own client is answered OK, so a lost reply is harmless. Fragments may arrive in any order or more than once, and each 4 KB flash sector is erased on its first write. There is no authentication.
+Status: 0 OK, 1 EINPROGRESS (another client's OTA is running), 2 EINVAL, 3 ENOENT (no OTA started), 4 EIO (flash), 5 EBADMSG (image rejected), 6 EFBIG (larger than the slot), 7 ENOSPC (file system full). Several clients can use the server at once: `status` and `reboot` work from any client, and one OTA runs at a time. A repeated `ota_start` from the OTA's own client is answered OK, so a lost reply is harmless. Fragments may arrive in any order or more than once, and each 4 KB flash sector is erased on its first write. There is no authentication.
+
+Files: `ota_fs_*` work on one file at a time in the config partition (`/winject`), owned by the client that opened it (others get EINPROGRESS; a file whose owner is quiet for 30 s is closed). `open` creates a missing file empty and returns its size. `read` and `write` take 1 to 1024 bytes at an offset up to the file size: a write overwrites and/or appends, a read is short at the end of the file. `truncate` only shrinks; `close` flushes. Names are `[A-Za-z0-9._-]`, up to 30 characters, no leading `.`; there are no directories. Every request is idempotent, so the tool resends until it gets a reply. The OTA and the open file are independent.
+
+```sh
+tools/udp_ota.py <addr> fs-get winject.conf current.conf    # - (default) prints it
+tools/udp_ota.py <addr> fs-put new.conf winject.conf        # write, truncate, close, read back and compare
+tools/udp_ota.py <addr> reboot                              # winject-l3 reads its config at boot
+```
+
+A broken `winject.conf` stops winject-l3, and with it the air path, at the next boot (`ROVER_L3_CONFIG_FAILED` on serial); udp_ota still answers on Ethernet, so keep a copy (`fs-get`) and fix it from there.
 
 Rollback is unchanged: the new image boots pending, and the proxy confirms it on its first m-plane request (local L3, right after boot). An image that boots far enough to start L3 is kept.
 
@@ -111,7 +126,7 @@ Host tests and a host server, for trying the tool over a lossy path:
 
 ```sh
 cmake -S tests -B build-tests && cmake --build build-tests && build-tests/udp_ota_test
-build-tests/udp_ota_host_server 47232 /tmp/out.bin 20 10 &   # drop 20% of requests, duplicate 10% of replies
+build-tests/udp_ota_host_server 47232 /tmp/out.bin 20 10 /tmp/fs &   # drop 20% of requests, duplicate 10% of replies; files in /tmp/fs
 tools/udp_ota.py 127.0.0.1:47232 flash build/rov-esp32p4.bin
 ```
 

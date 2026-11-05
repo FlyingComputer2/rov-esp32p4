@@ -645,6 +645,15 @@ extern "C" void app_main(void)
         printf("ROVER_PROXY_FAILED err=0x%x\n", err);
     }
 
+    /* Before udp_ota, which serves its files (ota_fs_*), and whatever the
+     * queues did: a broken winject.conf can then still be replaced over
+     * Ethernet. */
+    const esp_err_t config_err = mount_config();
+    if (config_err != ESP_OK)
+    {
+        printf("ROVER_CONFIG_FAILED err=%s\n", esp_err_to_name(config_err));
+    }
+
     err = start_ota();
     if (err != ESP_OK)
     {
@@ -660,12 +669,7 @@ extern "C" void app_main(void)
 
     if (queues)
     {
-        err = mount_config();
-        if (err != ESP_OK)
-        {
-            printf("ROVER_CONFIG_FAILED err=%s\n", esp_err_to_name(err));
-        }
-        else
+        if (config_err == ESP_OK)
         {
             start_l3();
         }

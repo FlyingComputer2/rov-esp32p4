@@ -1,10 +1,16 @@
 // Host tests for the udp_ota core (no ESP-IDF):
 //   cmake -S tests -B build-tests && cmake --build build-tests && build-tests/udp_ota_test
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <sstream>
+#include <unistd.h>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "fs.hpp"
 #include "server.hpp"
 
 using namespace udp_ota;
@@ -207,6 +213,150 @@ void test_restart_after_done()
     CHECK(f.begins == 2 && s.current() == server::state::active);
 }
 
+// ota_fs_* request builders and reply fields (wire.hpp).
+std::vector<uint8_t> fs_open_req(const std::string& name)
+{
+    std::vector<uint8_t> m {0x05};
+    m.insert(m.end(), name.begin(), name.end());
+    return m;
+}
+
+std::vector<uint8_t> fs_read_req(uint32_t off, uint16_t size)
+{
+    std::vector<uint8_t> m(7);
+    m[0] = 0x07;
+    put_u32(m.data() + 1, off);
+    put_u16(m.data() + 5, size);
+    return m;
+}
+
+std::vector<uint8_t> fs_write_req(uint32_t off, const std::string& data)
+{
+    std::vector<uint8_t> m(7);
+    m[0] = 0x08;
+    put_u32(m.data() + 1, off);
+    put_u16(m.data() + 5, static_cast<uint16_t>(data.size()));
+    m.insert(m.end(), data.begin(), data.end());
+    return m;
+}
+
+std::vector<uint8_t> fs_trunc_req(uint32_t size)
+{
+    std::vector<uint8_t> m(5);
+    m[0] = 0x09;
+    put_u32(m.data() + 1, size);
+    return m;
+}
+
+reply send(server& s, const std::vector<uint8_t>& m, const peer& p, uint32_t t = 0)
+{
+    reply r;
+    r.n = s.handle(m.data(), m.size(), p, t, r.b);
+    return r;
+}
+
+// Status byte of each fs reply type.
+status fs_st(const reply& r)
+{
+    switch (r.b[0])
+    {
+    case 0x87: return static_cast<status>(r.b[5]);
+    case 0x88: return static_cast<status>(r.b[7]);
+    default: return static_cast<status>(r.b[1]);
+    }
+}
+
+std::string slurp(const std::string& path)
+{
+    std::ifstream f(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f), {});
+}
+
+std::string make_dir()
+{
+    char tmpl[] = "/tmp/udp_ota_fs_XXXXXX";
+    return mkdtemp(tmpl);
+}
+
+void test_fs_write_overwrite_append_truncate()
+{
+    const std::string dir = make_dir();
+    { std::ofstream(dir + "/winject.conf") << "radio.channel = 1\n"; }
+    fake_flash f;
+    posix_file_store files(dir);
+    server s(f, 30000, {}, &files);
+
+    reply r = send(s, fs_open_req("winject.conf"), k_a);
+    CHECK(r.n == 6 && r.b[0] == 0x85 && fs_st(r) == status::ok && get_u32(r.b + 2) == 18);
+    CHECK(fs_st(send(s, fs_open_req("winject.conf"), k_a)) == status::ok);  // repeated open
+
+    // Overwrite in place, then append past the end.
+    r = send(s, fs_write_req(16, "13\n"), k_a);
+    CHECK(r.n == 12 && r.b[0] == 0x88 && get_u32(r.b + 1) == 16 && get_u16(r.b + 5) == 3 && fs_st(r) == status::ok);
+    CHECK(get_u32(r.b + 8) == 19);
+    r = send(s, fs_write_req(19, "x = 2\n"), k_a);
+    CHECK(fs_st(r) == status::ok && get_u32(r.b + 8) == 25);
+    CHECK(fs_st(send(s, fs_write_req(19, "x = 2\n"), k_a)) == status::ok);  // resend: same bytes
+    CHECK(fs_st(send(s, fs_write_req(26, "gap"), k_a)) == status::einval);    // past the end
+
+    r = send(s, fs_read_req(0, 1024), k_a);
+    CHECK(r.b[0] == 0x87 && fs_st(r) == status::ok && get_u32(r.b + 1) == 0);
+    CHECK(std::string(reinterpret_cast<char*>(r.b + 6), r.n - 6) == "radio.channel = 13\nx = 2\n");
+    r = send(s, fs_read_req(25, 10), k_a);
+    CHECK(fs_st(r) == status::ok && r.n == 6);                                 // at the end: empty
+    CHECK(fs_st(send(s, fs_read_req(26, 10), k_a)) == status::einval);        // past the end
+    CHECK(fs_st(send(s, fs_read_req(0, 1025), k_a)) == status::einval);       // too big
+
+    r = send(s, fs_trunc_req(19), k_a);
+    CHECK(r.b[0] == 0x89 && fs_st(r) == status::ok && get_u32(r.b + 2) == 19);
+    CHECK(fs_st(send(s, fs_trunc_req(20), k_a)) == status::einval);           // only shrinks
+    r = send(s, {0x06}, k_a);
+    CHECK(r.n == 2 && r.b[0] == 0x86 && fs_st(r) == status::ok);
+    CHECK(fs_st(send(s, {0x06}, k_a)) == status::ok);                          // repeated close
+    CHECK(slurp(dir + "/winject.conf") == "radio.channel = 13\n");
+
+    // No file open: read, write and truncate get ENOENT.
+    CHECK(fs_st(send(s, fs_read_req(0, 1), k_a)) == status::enoent);
+    CHECK(fs_st(send(s, fs_write_req(0, "a"), k_a)) == status::enoent);
+    CHECK(fs_st(send(s, fs_trunc_req(0), k_a)) == status::enoent);
+}
+
+void test_fs_one_file_owner_names_timeout()
+{
+    const std::string dir = make_dir();
+    fake_flash f;
+    posix_file_store files(dir);
+    server s(f, 1000, {}, &files);
+
+    reply r = send(s, fs_open_req("new.txt"), k_a, 0);
+    CHECK(fs_st(r) == status::ok && get_u32(r.b + 2) == 0);                    // created empty
+    CHECK(fs_st(send(s, fs_open_req("new.txt"), k_b, 0)) == status::einprogress);
+    CHECK(fs_st(send(s, fs_open_req("other.txt"), k_a, 0)) == status::einprogress);
+    CHECK(fs_st(send(s, fs_write_req(0, "b"), k_b, 0)) == status::einprogress);
+    CHECK(fs_st(send(s, fs_read_req(0, 1), k_b, 0)) == status::einprogress);
+    CHECK(fs_st(send(s, {0x06}, k_b, 0)) == status::einprogress);
+    CHECK(fs_st(send(s, fs_write_req(0, "a"), k_a, 500)) == status::ok);
+
+    // The OTA side is independent of the open file.
+    CHECK(start(s, 2, k_b, 500).st() == status::ok);
+
+    s.tick(1400);  // refreshed at 500
+    CHECK(fs_st(send(s, fs_open_req("other.txt"), k_b, 1400)) == status::einprogress);
+    s.tick(1600);  // idle: closed
+    CHECK(fs_st(send(s, fs_open_req("other.txt"), k_b, 1600)) == status::ok);
+    CHECK(slurp(dir + "/new.txt") == "a");
+
+    for (const char* bad : {"", ".hidden", "../x", "a/b", "sp ace", "1234567890123456789012345678901"})
+    {
+        CHECK(fs_st(send(s, fs_open_req(bad), k_a, 1600)) == status::einval);
+    }
+    CHECK(valid_file_name("123456789012345678901234567890", 30, k_file_name_max));
+
+    // Without a file store every fs request gets ENOENT.
+    server none(f, 1000);
+    CHECK(fs_st(send(none, fs_open_req("winject.conf"), k_a)) == status::enoent);
+}
+
 }  // namespace
 
 int main()
@@ -217,6 +367,8 @@ int main()
     test_timeout_and_failures();
     test_reboot();
     test_restart_after_done();
+    test_fs_write_overwrite_append_truncate();
+    test_fs_one_file_owner_names_timeout();
     if (g_failed)
     {
         std::printf("%d check(s) failed\n", g_failed);

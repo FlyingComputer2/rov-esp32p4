@@ -1,5 +1,6 @@
 #include "server.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -17,6 +18,7 @@ const char* status_name(status s)
     case status::eio: return "EIO";
     case status::ebadmsg: return "EBADMSG";
     case status::efbig: return "EFBIG";
+    case status::enospc: return "ENOSPC";
     }
     return "E?";
 }
@@ -32,10 +34,11 @@ const char* state_name(server::state s)
     return "?";
 }
 
-server::server(backend& flash, uint32_t idle_timeout_ms, std::function<void(bool)> on_active)
+server::server(backend& flash, uint32_t idle_timeout_ms, std::function<void(bool)> on_active, file_store* files)
     : m_flash(flash)
     , m_idle_timeout_ms(idle_timeout_ms)
     , m_on_active(std::move(on_active))
+    , m_files(files)
 {
 }
 
@@ -54,8 +57,19 @@ void server::end_active(state next)
     }
 }
 
+void server::fs_close_idle(uint32_t now_ms)
+{
+    if (m_fs_open && now_ms - m_fs_last_ms >= m_idle_timeout_ms)
+    {
+        std::printf("UDP_OTA fs timeout, closing %s\n", m_fs_name.c_str());
+        m_files->close();
+        m_fs_open = false;
+    }
+}
+
 void server::tick(uint32_t now_ms)
 {
+    fs_close_idle(now_ms);
     if (m_state == state::active && now_ms - m_last_ms >= m_idle_timeout_ms)
     {
         std::printf("UDP_OTA timeout after %u/%u fragments\n", (unsigned)m_received, (unsigned)m_count);
@@ -98,6 +112,11 @@ size_t server::handle(const uint8_t* req, size_t len, const peer& from, uint32_t
             return 2;
         }
         return on_status(reply);
+    case msg::fs_open:
+    case msg::fs_close:
+    case msg::fs_read:
+    case msg::fs_write:
+    case msg::fs_truncate: return on_fs(req, len, from, now_ms, reply);
     }
     reply[0] = req[0] | k_response;
     reply[1] = static_cast<uint8_t>(status::einval);
@@ -238,6 +257,161 @@ size_t server::on_status(uint8_t* reply)
         return 2;
     }
     return 2 + (static_cast<size_t>(n) < k_reply_max - 2 ? static_cast<size_t>(n) : k_reply_max - 3);
+}
+
+size_t server::on_fs(const uint8_t* req, size_t len, const peer& from, uint32_t now_ms, uint8_t* reply)
+{
+    const auto type = static_cast<msg>(req[0]);
+    reply[0] = req[0] | k_response;
+    // Each reply's layout, with st at its status byte (wire.hpp).
+    auto answer = [&](status st) -> size_t
+    {
+        switch (type)
+        {
+        case msg::fs_open:
+            reply[1] = static_cast<uint8_t>(st);
+            put_u32(reply + 2, st == status::ok ? m_fs_size : 0);
+            return 6;
+        case msg::fs_close:
+            reply[1] = static_cast<uint8_t>(st);
+            return 2;
+        case msg::fs_read:
+            put_u32(reply + 1, len >= 5 ? get_u32(req + 1) : 0);
+            reply[5] = static_cast<uint8_t>(st);
+            return 6;
+        case msg::fs_write:
+            put_u32(reply + 1, len >= 5 ? get_u32(req + 1) : 0);
+            put_u16(reply + 5, len >= 7 ? get_u16(req + 5) : 0);
+            reply[7] = static_cast<uint8_t>(st);
+            put_u32(reply + 8, m_fs_open ? m_fs_size : 0);
+            return 12;
+        default:  // fs_truncate
+            reply[1] = static_cast<uint8_t>(st);
+            put_u32(reply + 2, m_fs_open ? m_fs_size : 0);
+            return 6;
+        }
+    };
+
+    if (!m_files)
+    {
+        return answer(status::enoent);
+    }
+
+    if (type == msg::fs_open)
+    {
+        const char* name = reinterpret_cast<const char*>(req + 1);
+        if (!valid_file_name(name, len - 1, k_file_name_max))
+        {
+            return answer(status::einval);
+        }
+        const std::string n(name, len - 1);
+        if (m_fs_open)
+        {
+            // The owner repeating its open (lost reply) is fine; anyone else waits.
+            if (!(from == m_fs_owner && n == m_fs_name))
+            {
+                return answer(status::einprogress);
+            }
+            m_fs_last_ms = now_ms;
+            return answer(status::ok);
+        }
+        const status st = m_files->open(n, &m_fs_size);
+        if (st == status::ok)
+        {
+            m_fs_open = true;
+            m_fs_owner = from;
+            m_fs_name = n;
+            m_fs_last_ms = now_ms;
+            std::printf("UDP_OTA fs open %s size=%u\n", n.c_str(), (unsigned)m_fs_size);
+        }
+        return answer(st);
+    }
+
+    if (type == msg::fs_close)
+    {
+        if (len != 1)
+        {
+            return answer(status::einval);
+        }
+        if (!m_fs_open)
+        {
+            return answer(status::ok);  // nothing open, or a repeated close
+        }
+        if (!(from == m_fs_owner))
+        {
+            return answer(status::einprogress);
+        }
+        m_fs_open = false;
+        const status st = m_files->close();
+        std::printf("UDP_OTA fs close %s size=%u %s\n", m_fs_name.c_str(), (unsigned)m_fs_size, status_name(st));
+        return answer(st);
+    }
+
+    // read / write / truncate: on the open file, from its owner.
+    if (!m_fs_open)
+    {
+        return answer(status::enoent);
+    }
+    if (!(from == m_fs_owner))
+    {
+        return answer(status::einprogress);
+    }
+    m_fs_last_ms = now_ms;
+
+    if (type == msg::fs_read)
+    {
+        if (len != 7)
+        {
+            return answer(status::einval);
+        }
+        const uint32_t offset = get_u32(req + 1);
+        const uint16_t size = get_u16(req + 5);
+        if (size == 0 || size > k_fragment_size || offset > m_fs_size)
+        {
+            return answer(status::einval);
+        }
+        size_t n = 0;
+        const status st = m_files->read(offset, reply + 6, size, &n);
+        return answer(st) + (st == status::ok ? n : 0);
+    }
+
+    if (type == msg::fs_write)
+    {
+        if (len < 7)
+        {
+            return answer(status::einval);
+        }
+        const uint32_t offset = get_u32(req + 1);
+        const uint16_t size = get_u16(req + 5);
+        if (size == 0 || size > k_fragment_size || size != len - 7 || offset > m_fs_size ||
+            static_cast<uint64_t>(offset) + size > UINT32_MAX)
+        {
+            return answer(status::einval);
+        }
+        const status st = m_files->write(offset, req + 7, size);
+        if (st == status::ok && offset + size > m_fs_size)
+        {
+            m_fs_size = offset + size;
+        }
+        return answer(st);
+    }
+
+    // fs_truncate
+    if (len != 5)
+    {
+        return answer(status::einval);
+    }
+    const uint32_t size = get_u32(req + 1);
+    if (size > m_fs_size)
+    {
+        return answer(status::einval);
+    }
+    const status st = m_files->truncate(size);
+    if (st == status::ok)
+    {
+        m_fs_size = size;
+    }
+    return answer(st);
 }
 
 }  // namespace udp_ota
