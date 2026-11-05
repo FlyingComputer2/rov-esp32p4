@@ -58,6 +58,8 @@ constexpr int k_eth_phy_addr = 1;
 constexpr int k_eth_phy_reset_gpio = 51;
 constexpr const char* k_config_path = "/winject/winject.conf";
 constexpr size_t k_l3_stack_bytes = 16 * 1024;
+/* Core for the winject-l3 thread; see start_l3(). */
+constexpr int k_l3_cpu = 1;
 
 /* Registry names; config/winject.conf names the same ones. */
 constexpr const char* k_dp_reactor = "rover_dp";
@@ -423,8 +425,19 @@ void* run_l3(void*)
     return nullptr;
 }
 
+/* winject-l3's console, UDP upstreams and timers run on this thread, at the
+ * default pthread priority (5). It must be pinned to core 1: left unpinned,
+ * the RISC-V port pins it to whichever core it is on the first time it uses
+ * the FPU, which was core 0, where vs_isp_tx (priority 13) takes ~95% at
+ * 6 Mbit/s. With video running the console and the m-plane upstreams 4-6 then
+ * went seconds without an answer while core 1 sat ~58% idle. */
 void start_l3()
 {
+    esp_pthread_cfg_t prev {};
+    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.pin_to_core = k_l3_cpu;
+    esp_pthread_set_cfg(&cfg);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, k_l3_stack_bytes);
@@ -432,6 +445,16 @@ void start_l3()
     pthread_t t;
     const int err = pthread_create(&t, &attr, run_l3, nullptr);
     pthread_attr_destroy(&attr);
+    /* esp_pthread_set_cfg() applies to every thread app_main creates next. */
+    if (had_prev)
+    {
+        esp_pthread_set_cfg(&prev);
+    }
+    else
+    {
+        const esp_pthread_cfg_t def = esp_pthread_get_default_config();
+        esp_pthread_set_cfg(&def);
+    }
     if (err != 0)
     {
         ESP_LOGE(TAG, "winject-l3 thread: %d", err);
