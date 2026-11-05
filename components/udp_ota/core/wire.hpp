@@ -33,7 +33,8 @@
 // offset up to file_size: write overwrites and appends, read returns fewer
 // bytes at the end of the file. truncate only shrinks. close flushes; with
 // no file open it is answered OK. A file whose owner sends nothing for the
-// idle timeout is closed. Every request is idempotent, so a client can resend
+// idle timeout, or whose write fails, is closed; reboot_request closes it
+// (flushed) before the restart. Every request is idempotent, so a client can resend
 // any of them until its reply arrives.
 #pragma once
 
@@ -70,7 +71,7 @@ enum class status : uint8_t
     einval = 2,       // malformed request, fragment out of range or wrong size
     enoent = 3,       // fragment without a started OTA
     eio = 4,          // flash begin / erase / write failed
-    ebadmsg = 5,      // image complete but rejected (verify or set boot)
+    ebadmsg = 5,      // image complete but rejected (verify, other project, or set boot)
     efbig = 6,        // fragment_count * k_fragment_size exceeds the slot
     enospc = 7,       // file system full
 };

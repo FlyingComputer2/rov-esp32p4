@@ -357,6 +357,37 @@ void test_fs_one_file_owner_names_timeout()
     CHECK(fs_st(send(none, fs_open_req("winject.conf"), k_a)) == status::enoent);
 }
 
+struct fake_store : file_store
+{
+    uint32_t size = 10;
+    int closes = 0;
+    bool fail_write = false;
+    status open(const std::string&, uint32_t* sz) override { *sz = size; return status::ok; }
+    status read(uint32_t, uint8_t*, size_t, size_t* n) override { *n = 0; return status::ok; }
+    status write(uint32_t, const uint8_t*, size_t) override { return fail_write ? status::enospc : status::ok; }
+    status truncate(uint32_t) override { return status::ok; }
+    status close() override { ++closes; return status::ok; }
+};
+
+void test_fs_reboot_and_write_failure_close()
+{
+    fake_flash f;
+    fake_store st;
+    server s(f, 30000, {}, &st);
+    CHECK(fs_st(send(s, fs_open_req("winject.conf"), k_a)) == status::ok);
+    CHECK(simple(s, 0x03, k_b).b[1] == 0);  // reboot from anyone flushes the file
+    CHECK(st.closes == 1 && s.reboot_requested());
+    CHECK(fs_st(send(s, fs_read_req(0, 1), k_a)) == status::enoent);
+
+    server s2(f, 30000, {}, &st);
+    CHECK(fs_st(send(s2, fs_open_req("winject.conf"), k_a)) == status::ok);
+    st.fail_write = true;
+    CHECK(fs_st(send(s2, fs_write_req(0, "abc"), k_a)) == status::enospc);
+    CHECK(st.closes == 2);                                                  // closed on failure
+    CHECK(fs_st(send(s2, fs_write_req(0, "abc"), k_a)) == status::enoent);  // must reopen
+    CHECK(fs_st(send(s2, fs_open_req("winject.conf"), k_b)) == status::ok); // free again
+}
+
 }  // namespace
 
 int main()
@@ -369,6 +400,7 @@ int main()
     test_restart_after_done();
     test_fs_write_overwrite_append_truncate();
     test_fs_one_file_owner_names_timeout();
+    test_fs_reboot_and_write_failure_close();
     if (g_failed)
     {
         std::printf("%d check(s) failed\n", g_failed);

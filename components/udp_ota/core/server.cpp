@@ -101,6 +101,13 @@ size_t server::handle(const uint8_t* req, size_t len, const peer& from, uint32_t
             m_flash.abort();
             end_active(state::idle);
         }
+        if (m_fs_open)
+        {
+            // Flush before the restart; unflushed SPIFFS data would be lost.
+            std::printf("UDP_OTA fs close %s for reboot\n", m_fs_name.c_str());
+            m_files->close();
+            m_fs_open = false;
+        }
         m_reboot = true;
         reply[1] = static_cast<uint8_t>(status::ok);
         return 2;
@@ -389,7 +396,17 @@ size_t server::on_fs(const uint8_t* req, size_t len, const peer& from, uint32_t 
             return answer(status::einval);
         }
         const status st = m_files->write(offset, req + 7, size);
-        if (st == status::ok && offset + size > m_fs_size)
+        if (st != status::ok)
+        {
+            // A partial write leaves the size unknown: close, so the client
+            // reopens and learns it from the open response.
+            std::printf("UDP_OTA fs write %s at %u failed: %s, closed\n", m_fs_name.c_str(), (unsigned)offset,
+                        status_name(st));
+            m_files->close();
+            m_fs_open = false;
+            return answer(st);
+        }
+        if (offset + size > m_fs_size)
         {
             m_fs_size = offset + size;
         }

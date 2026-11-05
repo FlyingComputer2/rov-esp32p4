@@ -11,8 +11,9 @@ Rover over Ethernet: <rover IP>:3232. Rover over the air: <ground IP>:2430
 (ground L3 upstream 9 -> air -> rover upstream 9 -> 127.0.0.1:3232).
 flash sends the image as 1024-byte fragments with up to --window in flight
 and retransmits unanswered ones; the reply to the fragment that completes the
-image says whether the P4 accepted it. With --reboot it then boots the image
-and waits until the P4 answers status with the new image's ELF SHA.
+image says whether the P4 accepted it (it rejects an image of another
+project). With --reboot it then boots the image and waits until the P4 runs it
+with state=valid, and checks again 10 s later (no rollback).
 fs-get / fs-put read and write one file in the P4's config partition
 (/winject, e.g. winject.conf); fs-put overwrites the file, truncates it to
 the new length, closes it and reads it back to verify. A changed config takes
@@ -248,19 +249,42 @@ class Client:
         )
 
 
-def wait_for_image(client, elf, timeout_s, log=print):
+def status_field(text, key):
+    """Value of key=value in a status line, or None."""
+    for word in text.split():
+        if word.startswith(key + "="):
+            return word[len(key) + 1 :]
+    return None
+
+
+def wait_for_image(client, elf, timeout_s, settle_s=10, log=print):
+    """Waits until the P4 runs the image with this ELF SHA and has confirmed it
+    (state=valid), then checks again after settle_s: about half of P4 OTAs
+    used to reset at first boot and roll back, and a pending image that
+    resets is rolled back by the bootloader."""
     deadline = time.monotonic() + timeout_s
     time.sleep(2)
+    last = None
     while time.monotonic() < deadline:
         try:
             st = client.status(tries=1, timeout=1.0)
         except OtaError:
             continue
-        log("status: " + st)
-        if elf is None or ("elf=" + elf) in st:
-            return st
-        raise OtaError("P4 answers with another image (rolled back?), want elf=%s" % elf)
-    raise OtaError("P4 did not answer within %d s after reboot" % timeout_s)
+        if st != last:
+            log("status: " + st)
+            last = st
+        if elf is not None and status_field(st, "elf") != elf:
+            raise OtaError("P4 answers with another image (rolled back?), want elf=%s" % elf)
+        if status_field(st, "state") != "valid":
+            time.sleep(0.5)
+            continue
+        time.sleep(settle_s)
+        st = client.status()
+        if elf is not None and status_field(st, "elf") != elf:
+            raise OtaError("image was running but the P4 rolled back: " + st)
+        log("confirmed: " + st)
+        return st
+    raise OtaError("P4 did not confirm the image within %d s after reboot (last: %s)" % (timeout_s, last))
 
 
 def main():
@@ -274,6 +298,7 @@ def main():
     fl.add_argument("--window", type=int, default=8, help="fragments in flight (default 8)")
     fl.add_argument("--reboot", action="store_true", help="boot the new image and wait for it")
     fl.add_argument("--boot-timeout", type=int, default=90)
+    fl.add_argument("--force", action="store_true", help="flash even if the project names differ")
     fg = sub.add_parser("fs-get", help="read a file from the config partition")
     fg.add_argument("name")
     fg.add_argument("local", nargs="?", default="-", help="output file, - = stdout (default)")
@@ -312,7 +337,14 @@ def main():
                 )
             else:
                 print("image: %d B (no esp_app_desc_t found)" % len(image))
-            print("before: " + client.status())
+            before = client.status()
+            print("before: " + before)
+            running = status_field(before, "project")
+            if desc and running and desc["project"] != running and not args.force:
+                raise OtaError(
+                    "image is project %s but the P4 runs %s (the P4 rejects it too; --force skips this check)"
+                    % (desc["project"], running)
+                )
             client.flash(image, max(1, args.window))
             if args.reboot:
                 client.reboot()

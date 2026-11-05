@@ -122,6 +122,17 @@ public:
         m_handle = 0;
         if (err == ESP_OK)
         {
+            /* A valid image for another board (e.g. gnd-esp32p4, same chip)
+             * would boot and confirm itself; only this project is taken. */
+            esp_app_desc_t desc {};
+            const esp_app_desc_t* self = esp_app_get_description();
+            if (esp_ota_get_partition_description(m_part, &desc) != ESP_OK ||
+                std::strncmp(desc.project_name, self->project_name, sizeof(desc.project_name)) != 0)
+            {
+                ESP_LOGE(TAG, "image %u B is project '%.32s', running '%.32s': rejected", (unsigned)size,
+                         desc.project_name, self->project_name);
+                return status::ebadmsg;
+            }
             err = esp_ota_set_boot_partition(m_part);
         }
         if (err != ESP_OK)

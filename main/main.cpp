@@ -66,7 +66,7 @@ constexpr size_t k_l3_stack_bytes = 16 * 1024;
 constexpr int k_l3_cpu = 1;
 
 /* Threads winject-l3 starts itself (its upstream reactor, which delivers the
- * L3-owned queues of upstreams 0, 2, 3, 7 and 8). These are the settings they used
+ * L3-owned queues of upstreams 0, 2, 3, 7, 8 and 9). These are the settings they used
  * to get by inheriting the clock-sync client's config, which start_synch()
  * left on the l3 thread; only the name is new. */
 constexpr size_t k_l3_child_stack_bytes = 6 * 1024;
@@ -169,6 +169,9 @@ constexpr size_t k_bwtest_mplane_upstream = 7;
 constexpr const char* k_bwtest_mplane_target = "127.0.0.1:5100";
 constexpr size_t k_synch_mplane_upstream = 8;
 constexpr const char* k_synch_mplane_target = "127.0.0.1:5110";
+/* Upstream 9: udp_ota over the air, relayed the same way (ground UDP 2430). */
+constexpr size_t k_ota_upstream = 9;
+constexpr const char* k_ota_target = "127.0.0.1:3232";
 
 /* Upstream 3: rover_sample's L3-owned queue (RC from the ground, telemetry
  * back). Its sensors share the board I2C with the camera SCCB and the codec:
@@ -416,7 +419,8 @@ void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
 
 /* Relays a local console over its upstream's queue (mplane_relay). Low
  * priority and unpinned like the tester: m-plane traffic is a few datagrams
- * per operator command, and a 5 ms poll costs video nothing. */
+ * per operator command, and a 5 ms poll costs video nothing; an OTA (video
+ * paused) is the only bulk user. */
 void start_mplane_relay(size_t index, std::shared_ptr<winject::UpstreamQueue> up,
                         const char* name, const char* target)
 {
@@ -506,6 +510,10 @@ void* run_l3(void*)
         else if (index == k_synch_mplane_upstream)
         {
             start_mplane_relay(index, std::move(up), "synch_relay", k_synch_mplane_target);
+        }
+        else if (index == k_ota_upstream)
+        {
+            start_mplane_relay(index, std::move(up), "ota_relay", k_ota_target);
         }
     };
     std::string err;
