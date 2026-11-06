@@ -15,8 +15,8 @@
 // UDP console 5120), also on an L3-owned queue. Upstreams 7 and 8 carry the
 // tester's and the clock-sync client's consoles to the ground (mplane_relay,
 // one loopback socket per ground client). The radio m-plane stays on UDP
-// loopback. App updates go over udp_ota (UDP 3232), on Ethernet or over the
-// air through upstream 9; the proxy's HTTP is off.
+// loopback. App and C6 updates go over the SDIO proxy's udp_ota (UDP 3232),
+// on Ethernet or over the air through upstream 9.
 
 #include <inttypes.h>
 #include <pthread.h>
@@ -49,7 +49,6 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "rover_sample/rover_sample.hpp"
-#include "udp_ota/udp_ota.hpp"
 #include "vstreamer_idf/live_tx.hpp"
 #include "winject_proxy.h"
 
@@ -180,9 +179,11 @@ constexpr const char* k_ota_target = "127.0.0.1:3232";
  * source then uses it instead of creating (and on teardown deleting) its own. */
 constexpr size_t k_rover_sample_upstream = 3;
 
-/* udp_ota: tools/udp_ota.py <rover IP>:3232 on Ethernet; over the air the
- * ground's UDP 2430 reaches it through upstream 9 (config/winject.conf). */
-constexpr uint16_t k_ota_port = 3232;
+/* udp_ota (in the SDIO proxy): the proxy's tools/udp_ota.py <rover IP>:3232
+ * on Ethernet; over the air the ground's UDP 2430 reaches it through upstream
+ * 9 (config/winject.conf). It updates this app and the C6, and serves the
+ * config partition's files. */
+constexpr const char* k_ota_fs_dir = "/winject";
 constexpr const char* k_rover_sample_console = "0.0.0.0:5120";
 constexpr i2c_port_num_t k_board_i2c_port = I2C_NUM_0;
 constexpr int k_board_i2c_sda = 7;
@@ -281,26 +282,20 @@ esp_err_t mount_config()
  * restart. */
 std::atomic<bool> g_video_pause {false};
 
-/* App update server. Video pauses while an image comes in (it would take
- * most of the airtime) and goes back to what it was when the OTA ends
- * without a reboot (failure, timeout, or done but not rebooted yet). */
-esp_err_t start_ota()
+/* udp_ota's on_ota_active. Video pauses while an image comes in (it would
+ * take most of the airtime) or the C6 is written (its radio stalls on every
+ * flash write), and goes back to what it was afterwards. */
+void on_ota_active(bool active, void*)
 {
-    udp_ota::config cfg;
-    cfg.port = k_ota_port;
-    cfg.on_active = [](bool active)
+    static bool paused_before = false;
+    if (active)
     {
-        static bool paused_before = false;
-        if (active)
-        {
-            paused_before = g_video_pause.exchange(true);
-        }
-        else
-        {
-            g_video_pause.store(paused_before);
-        }
-    };
-    return udp_ota::start(cfg);
+        paused_before = g_video_pause.exchange(true);
+    }
+    else
+    {
+        g_video_pause.store(paused_before);
+    }
 }
 
 /* Runs app_bwtest on its upstream's queue. Its sender and receive poller
@@ -626,6 +621,15 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Ethernet: %s", esp_err_to_name(err));
     }
 
+    /* Before the proxy, whose udp_ota serves its files (ota_fs_*), and
+     * whatever the queues do: a broken winject.conf can then still be
+     * replaced over Ethernet. */
+    const esp_err_t config_err = mount_config();
+    if (config_err != ESP_OK)
+    {
+        printf("ROVER_CONFIG_FAILED err=%s\n", esp_err_to_name(config_err));
+    }
+
     /* Without the queues the proxy still starts (UDP d-plane) and udp_ota
      * can replace this image over Ethernet; winject-l3 and video stay off. */
     const bool queues = start_dplane_queues();
@@ -639,8 +643,9 @@ extern "C" void app_main(void)
      * for the C6 UART recovery bridge; all three need LDO_VO4 at 3.3 V. */
     cfg.link.boot_gpio = 47;
     cfg.link.boot_gpio_ldo = 4;
-    /* No HTTP: the app is updated over udp_ota, the C6 over its UART. */
-    cfg.http_port = 0;
+    /* udp_ota on its default port (3232) updates this app and the C6. */
+    cfg.ota_fs_dir = config_err == ESP_OK ? k_ota_fs_dir : nullptr;
+    cfg.on_ota_active = on_ota_active;
     if (queues)
     {
         cfg.dplane_tx_queue = k_wifi_tx;
@@ -651,21 +656,6 @@ extern "C" void app_main(void)
     if (err != ESP_OK)
     {
         printf("ROVER_PROXY_FAILED err=0x%x\n", err);
-    }
-
-    /* Before udp_ota, which serves its files (ota_fs_*), and whatever the
-     * queues did: a broken winject.conf can then still be replaced over
-     * Ethernet. */
-    const esp_err_t config_err = mount_config();
-    if (config_err != ESP_OK)
-    {
-        printf("ROVER_CONFIG_FAILED err=%s\n", esp_err_to_name(config_err));
-    }
-
-    err = start_ota();
-    if (err != ESP_OK)
-    {
-        printf("ROVER_OTA_FAILED err=%s\n", esp_err_to_name(err));
     }
 
     /* Before video: the camera source adopts this bus. */
