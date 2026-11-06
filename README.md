@@ -16,6 +16,8 @@ Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP3
 
 `main/main.cpp` registers the four queues (`bfc::cv_reactor_circular_lossy_queue_registry`) and one `bfc::cv_reactor` (`rover_dp`, its own thread) before starting the three, and keeps them for the life of the program. The proxy, winject-l3 (`radio.dplane_tx` / `radio.dplane_rx` / `radio.reactor`, upstream 1 `QUEUE_FORWARDING`) and vstreamer (`live_tx_config.queue_*`) bind them by name. A full queue drops its oldest datagram: the proxy counts it as `dup_evict`, winject-l3 in its metrics, vstreamer in `snd` stats.
 
+Low-rate applets share one reactor thread instead of a thread each: `components/app_kit` runs a `bfc::default_reactor` registered under the name `apps` (priority 10, PSRAM stack), and the applets get only that name and register their callbacks on `start()`. On it run the tester (`components/applets`: console 5100, receive side, m-plane on upstream 7), the krono client's console and m-plane (upstream 8; its exchanges block, so they keep a priority-12 worker) and rover_sample's RC link and console (its 250 Hz control task stays). Sockets wake the reactor; reactor timers drain the L3-owned queues every 2 ms, at most `app_kit::k_max_batch` (16) datagrams per socket or queue per pass. App threads get PSRAM stacks by default (`app_kit::thread_spec`); internal stacks only where a thread writes flash or is timing-critical. `ROVER_HEAP` prints the internal RAM left before video starts and every 10 s.
+
 The GS side is [gnd-esp32p4](https://github.com/FlyingComputer2/gnd-esp32p4): winject-l3, the SDIO proxy and the video receiver on a Guition P4 + C6. Its L3 config is built in (`l3_main()` in its `main/main.cpp`) and pairs with [`config/winject.conf`](config/winject.conf) by domain, channel and upstream id, with buses swapped. The earlier GS, [gnd](https://github.com/FlyingComputer2/gnd) (winject-l3 + RTL8812AU on the opi5), is archived.
 
 All three come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). All three fetch bfc under one FetchContent name and must use the same bfc (they share its registries); the top-level `CMakeLists.txt` declares it first, so it wins, and its pin should stay equal to theirs. vstreamer and winject-l3 also share ISA-L, so bump their pins together. To build against local checkouts:
@@ -73,11 +75,11 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 | 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | none. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
 | 5 | C6 radio m-plane | UDP static `127.0.0.1:2420` → proxy `127.0.0.1:22` | 7c / c7 | none. The ground is UDP server on `0.0.0.0:2420` (buses c7 / 7c) |
 | 6 | Rover vstreamer m-plane | UDP static `127.0.0.1:5092` → vstreamer `127.0.0.1:5090` | 8d / d8 | none. The ground is UDP server on `0.0.0.0:5092` (buses d8 / 8d) |
-| 7 | Bandwidth tester console | L3-owned queue, `mplane_relay` → tester `127.0.0.1:5100` | 4b / b4 | none. The ground serves it on `0.0.0.0:5102` (buses b4 / 4b), several operators at once |
-| 8 | Clock-sync console | L3-owned queue, `mplane_relay` → krono `127.0.0.1:5110` | 5c / c5 | none. The ground serves it on `0.0.0.0:5112` (buses c5 / 5c), several operators at once |
-| 9 | App update and config files (udp_ota) | L3-owned queue, `mplane_relay` → udp_ota `127.0.0.1:3232` | 9e / e9 | none: the tool retransmits. The ground serves it on `0.0.0.0:2430` (buses e9 / 9e), several clients at once |
+| 7 | Bandwidth tester m-plane | L3-owned queue, served directly by the tester applet (its console's commands, request in, reply out) | 4b / b4 | none. The ground is UDP server on `0.0.0.0:5102` (buses b4 / 4b), one operator at a time |
+| 8 | Clock-sync m-plane | L3-owned queue, served directly by the krono client applet | 5c / c5 | none. The ground is UDP server on `0.0.0.0:5112` (buses c5 / 5c), one operator at a time |
+| 9 | App and C6 update, config files (udp_ota) | UDP static `127.0.0.1:2430` → udp_ota `127.0.0.1:3232` | 9e / e9 | none: the tool retransmits. The ground is UDP server on `0.0.0.0:2430` (buses e9 / 9e), one client at a time |
 
-Existing upstreams keep their ids and buses. Upstreams 7 and 8 carry the tester's and the sync client's consoles, and upstream 9 udp_ota, to the ground through `components/mplane_relay`: the ground gives each operator address a 1-byte client id (air datagram `[id][request]`) and the relay here sends each request to the console from that client's own loopback socket (up to 4, least recently used closed first, 2 min idle), so several operators can use them at once and each reply returns to whoever asked. Upstreams 5 to 9 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`.
+Existing upstreams keep their ids and buses. Upstreams 7 and 8 are the tester's and the sync client's m-planes: their applets serve their consoles' commands directly on the L3-owned queues (no socket in between). Like 4-6, the ground is a UDP server that replies to the last sender, so one operator at a time. Upstreams 5 to 9 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`.
 
 The video settings (bitrate, FEC 6/8, `fec_spread_ms` 4; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`, `get sys stats`; `set tx pause 1` pauses live TX, nothing sent while camera and encoder keep running, and `set tx pause 0` resumes it from a fresh IDR). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
 
@@ -152,7 +154,7 @@ The rover's clock-sync console is likewise reachable through the ground on UDP 5
 Each datagram includes a send timestamp. Receiver `stats` reports last, minimum,
 average and maximum one-way latency in microseconds since `clr`. This measures
 sender queue submission to receiver polling, including L3/FEC/radio queueing and
-the receiver's 10 ms idle polling interval plus scheduler delays. It requires
+the receiver's 2 ms receive poll on the app reactor plus scheduler delays. It requires
 synchronized realtime clocks (rover follows ground through krono). Legacy,
 malformed, zero or future timestamps count in `lat_invalid` instead of latency
 samples. Check `lat_samples` before interpreting zero-valued latency fields.
@@ -238,7 +240,7 @@ Console: `ROVER_SAMPLE uptime_s=… state=…` (the `status` text) every 10 s; `
 
 Memory: live TX needs the internal RAM. With rover_sample's stacks there (20 KB left) it fell to ~20 fps, so all of rover_sample's stacks are in PSRAM (live TX 29 fps, ~35 KB internal left). NVS access, which writes flash and so needs an internal stack, runs on a short-lived task with its stack in RTC RAM. A `save` stalls the control loop for a few ms (flash write).
 
-Host tests: `cmake -S tests -B build-tests && cmake --build build-tests && build-tests/rover_sample_test && build-tests/mplane_relay_test`.
+Host tests: `cmake -S tests -B build-tests && cmake --build build-tests && build-tests/rover_sample_test`.
 
 ## Status
 

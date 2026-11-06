@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <bfc/default_reactor.hpp>
 
@@ -30,7 +31,6 @@ namespace app_kit
 using reactor_t = bfc::default_reactor<std::function<void()>>;
 using reactor_tag = bfc::object_tag<reactor_t>;
 using reactor_registry = bfc::object_registry<reactor_tag>;
-using cancel_fn = std::function<void()>;
 
 // The board's app reactor (main.cpp starts it).
 constexpr const char* k_apps_reactor = "apps";
@@ -91,15 +91,38 @@ std::shared_ptr<reactor_t> find_reactor(const std::string& name);
 // Runs fn on r's thread (from any thread).
 void post(reactor_t& r, std::function<void()> fn);
 
-// Calls fn on r's thread every period_ms from now on. The returned function
-// stops future calls; fn must not block.
-cancel_fn every(reactor_t& r, uint32_t period_ms, std::function<void()> fn);
+// Calls fn on r's thread every period_ms from now on, for the life of the
+// program (from any thread). fn must not block.
+void every(reactor_t& r, uint32_t period_ms, std::function<void()> fn);
 
-// A UDP console on host:port, served on r: one command per datagram,
-// handle's reply to the sender. Returns an empty function if binding fails;
-// otherwise the returned function unregisters and closes it.
-cancel_fn udp_console(reactor_t& r, const std::string& host_port,
-                      std::function<std::string(const std::string& line)> handle);
+// At most this many datagrams per callback or tick, so one busy socket or
+// queue cannot hold the reactor: the reactor is level-triggered, so what is
+// left is read on its next pass, after the other ready work.
+constexpr size_t k_max_batch = 16;
+
+// A datagram transport, e.g. an L3-owned upstream queue: send one (false if
+// not taken), receive one (false when none, never blocks).
+struct datagrams
+{
+    std::function<bool(const uint8_t* data, size_t len)> send;
+    std::function<bool(std::vector<uint8_t>* out)> receive;
+};
+
+// An m-plane served directly on a datagram transport (an L3 upstream, no
+// socket): every poll_ms up to max_batch requests are taken from it and each
+// one's non-empty reply sent back on it. False if link is incomplete.
+bool queue_console(reactor_t& r, datagrams link, std::function<std::string(const std::string& line)> handle,
+                   uint32_t poll_ms = 2, size_t max_batch = k_max_batch);
+
+// Calls fn on r's thread while fd is readable, for the life of the program
+// (from any thread). fn should read at most k_max_batch datagrams per call.
+void watch(reactor_t& r, int fd, std::function<void()> fn);
+
+// A UDP console on host:port, served on r for the life of the program: one
+// command per datagram, handle's reply to the sender, at most k_max_batch per
+// pass. False if the socket cannot be bound.
+bool udp_console(reactor_t& r, const std::string& host_port,
+                 std::function<std::string(const std::string& line)> handle);
 
 // Parses host:port into a sockaddr_in (as bytes, to keep lwIP out of this
 // header); false if it is not one.

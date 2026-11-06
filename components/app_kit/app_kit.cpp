@@ -6,7 +6,6 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <atomic>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -20,27 +19,14 @@ namespace
 
 const char* TAG = "app_kit";
 
-struct periodic
-{
-    std::atomic<bool> active {true};
-    std::function<void()> fn;
-};
-
-void arm(reactor_t& r, uint32_t period_ms, const std::shared_ptr<periodic>& job)
+void arm(reactor_t& r, uint32_t period_ms, const std::shared_ptr<std::function<void()>>& fn)
 {
     reactor_t* rp = &r;
     r.get_timer().wait_ms(period_ms,
-                          [rp, period_ms, job]
+                          [rp, period_ms, fn]
                           {
-                              if (!job->active.load())
-                              {
-                                  return;
-                              }
-                              job->fn();
-                              if (job->active.load())
-                              {
-                                  arm(*rp, period_ms, job);
-                              }
+                              (*fn)();
+                              arm(*rp, period_ms, fn);
                           });
 }
 
@@ -107,20 +93,12 @@ void post(reactor_t& r, std::function<void()> fn)
     r.wake_up([boxed] { (*boxed)(); });
 }
 
-cancel_fn every(reactor_t& r, uint32_t period_ms, std::function<void()> fn)
+void every(reactor_t& r, uint32_t period_ms, std::function<void()> fn)
 {
-    auto job = std::make_shared<periodic>();
-    job->fn = std::move(fn);
+    auto boxed = std::make_shared<std::function<void()>>(std::move(fn));
     reactor_t* rp = &r;
     /* Armed on the reactor thread, so its wait picks the new deadline up. */
-    r.wake_up([rp, period_ms, job]
-              {
-                  if (job->active.load())
-                  {
-                      arm(*rp, period_ms, job);
-                  }
-              });
-    return [job] { job->active.store(false); };
+    r.wake_up([rp, period_ms, boxed] { arm(*rp, period_ms, boxed); });
 }
 
 bool parse_host_port(const std::string& s, void* sockaddr_in_out)
@@ -143,59 +121,80 @@ bool parse_host_port(const std::string& s, void* sockaddr_in_out)
     return inet_pton(AF_INET, s.substr(0, colon).c_str(), &out->sin_addr) == 1;
 }
 
-cancel_fn udp_console(reactor_t& r, const std::string& host_port,
-                      std::function<std::string(const std::string& line)> handle)
+void watch(reactor_t& r, int fd, std::function<void()> fn)
+{
+    auto boxed = std::make_shared<std::function<void()>>(std::move(fn));
+    reactor_t* rp = &r;
+    post(r, [rp, fd, boxed] { rp->add_read_rdy(fd, [boxed] { (*boxed)(); }); });
+}
+
+bool queue_console(reactor_t& r, datagrams link, std::function<std::string(const std::string& line)> handle,
+                   uint32_t poll_ms, size_t max_batch)
+{
+    if (!link.send || !link.receive || !handle)
+    {
+        return false;
+    }
+    every(r, poll_ms,
+                 [link = std::move(link), handle = std::move(handle), max_batch]
+                 {
+                     std::vector<uint8_t> req;
+                     for (size_t i = 0; i < max_batch && link.receive(&req); ++i)
+                     {
+                         const std::string reply = handle(std::string(req.begin(), req.end()));
+                         if (!reply.empty())
+                         {
+                             link.send(reinterpret_cast<const uint8_t*>(reply.data()), reply.size());
+                         }
+                     }
+                 });
+    return true;
+}
+
+bool udp_console(reactor_t& r, const std::string& host_port,
+                 std::function<std::string(const std::string& line)> handle)
 {
     sockaddr_in addr {};
     if (!parse_host_port(host_port, &addr))
     {
         ESP_LOGE(TAG, "bad console address %s", host_port.c_str());
-        return {};
+        return false;
     }
     const int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0)
     {
-        return {};
+        return false;
     }
     if (bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0)
     {
         ESP_LOGE(TAG, "cannot bind console %s", host_port.c_str());
         close(fd);
-        return {};
+        return false;
     }
-    auto active = std::make_shared<std::atomic<bool>>(true);
-    auto on_readable = std::make_shared<std::function<void()>>(
-        [fd, active, handle = std::move(handle)]
-        {
-            if (!active->load())
-            {
-                return;
-            }
-            char buf[512];
-            sockaddr_in from {};
-            socklen_t from_len = sizeof(from);
-            const ssize_t n =
-                recvfrom(fd, buf, sizeof(buf) - 1, MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&from), &from_len);
-            if (n <= 0)
-            {
-                return;
-            }
-            buf[n] = '\0';
-            const std::string reply = handle(buf);
-            if (!reply.empty())
-            {
-                sendto(fd, reply.data(), reply.size(), 0, reinterpret_cast<const sockaddr*>(&from), from_len);
-            }
-        });
-    reactor_t* rp = &r;
-    post(r, [rp, fd, on_readable] { rp->add_read_rdy(fd, [on_readable] { (*on_readable)(); }); });
-    return [rp, fd, active]
-    {
-        if (active->exchange(false))
-        {
-            rp->rem_read_rdy(fd, [fd] { close(fd); });
-        }
-    };
+    watch(r, fd,
+                 [fd, handle = std::move(handle)]
+                 {
+                     for (size_t i = 0; i < k_max_batch; ++i)
+                     {
+                         char buf[512];
+                         sockaddr_in from {};
+                         socklen_t from_len = sizeof(from);
+                         const ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, MSG_DONTWAIT,
+                                                    reinterpret_cast<sockaddr*>(&from), &from_len);
+                         if (n <= 0)
+                         {
+                             return;
+                         }
+                         buf[n] = '\0';
+                         const std::string reply = handle(buf);
+                         if (!reply.empty())
+                         {
+                             sendto(fd, reply.data(), reply.size(), 0, reinterpret_cast<const sockaddr*>(&from),
+                                    from_len);
+                         }
+                     }
+                 });
+    return true;
 }
 
 }  // namespace app_kit

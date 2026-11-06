@@ -121,13 +121,12 @@ struct status
     bool mag_cal_running = false;
 };
 
-class app : public std::enable_shared_from_this<app>
+class app
 {
    public:
     explicit app(const config& cfg) : cfg_(cfg) {}
     bool configure();
     bool start();
-    void stop();
     // Reactor thread: drain RC, send telemetry when due; one console line.
     void poll_link();
     std::string command(const std::string& line);
@@ -135,11 +134,7 @@ class app : public std::enable_shared_from_this<app>
    private:
     static void control_trampoline(void* arg)
     {
-        auto* self = static_cast<app*>(arg);
-        self->control_task();
-        self->task_running_.store(false);
-        self->control_keepalive_.reset();
-        vTaskDeleteWithCaps(nullptr);
+        static_cast<app*>(arg)->control_task();  // never returns
     }
     void control_task();
     void handle_frame(const msp::frame& f);
@@ -153,11 +148,6 @@ class app : public std::enable_shared_from_this<app>
     config cfg_;
     i2c_master_bus_handle_t bus_ = nullptr;
     std::shared_ptr<app_kit::reactor_t> reactor_;
-    app_kit::cancel_fn console_;
-    app_kit::cancel_fn link_poll_;
-    std::atomic<bool> running_ {false};
-    std::atomic<bool> task_running_ {false};
-    std::shared_ptr<app> control_keepalive_;
     bool configured_ = false;
     mpu6050 imu_;
     magnetometer mag_;
@@ -185,7 +175,6 @@ class app : public std::enable_shared_from_this<app>
 
 bool app::configure()
 {
-    stop();
     if (i2c_master_get_bus_handle(static_cast<i2c_port_num_t>(cfg_.pin.i2c_port), &bus_) != ESP_OK)
     {
         ESP_LOGE(TAG, "no I2C%d bus: create it before rover_sample configure", cfg_.pin.i2c_port);
@@ -205,54 +194,31 @@ bool app::configure()
 
 bool app::start()
 {
-    if (!configured_ || running_.exchange(true))
+    if (!configured_)
     {
         return false;
     }
-
     /* Internal RAM is short with 1080p live TX running: with rover_sample's
      * stacks internal (20 KB left) live TX fell to ~20 fps, its sender and FEC
      * ~5x slower; on PSRAM stacks it runs at 29 fps as without rover_sample.
      * So the control task's stack is in PSRAM (the app reactor's is too, see
      * app_kit) and only NVS access borrows an internal one
      * (on_internal_stack). */
-    task_running_.store(true);
-    control_keepalive_ = shared_from_this();
     if (xTaskCreatePinnedToCoreWithCaps(control_trampoline, "rs_control", 6 * 1024, this, cfg_.control_prio,
                                         nullptr, cfg_.control_core, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) !=
         pdPASS)
     {
         ESP_LOGE(TAG, "control task not created");
-        control_keepalive_.reset();
-        task_running_.store(false);
-        running_.store(false);
         return false;
     }
-    auto self = shared_from_this();
-    console_ = app_kit::udp_console(*reactor_, cfg_.console,
-                                    [self](const std::string& line) { return self->command(line); });
-    if (!console_)
+    if (!app_kit::udp_console(*reactor_, cfg_.console, [this](const std::string& line) { return command(line); }))
     {
-        stop();
         return false;
     }
-    link_poll_ = app_kit::every(*reactor_, cfg_.link_poll_ms, [self] { self->poll_link(); });
+    app_kit::every(*reactor_, cfg_.link_poll_ms, [this] { poll_link(); });
     printf("rover_sample: console %s, RC/telemetry MSP v2 on the link (reactor %s)\n", cfg_.console.c_str(),
            cfg_.reactor.c_str());
     return true;
-}
-
-void app::stop()
-{
-    running_.store(false);
-    if (link_poll_) link_poll_();
-    if (console_) console_();
-    link_poll_ = {};
-    console_ = {};
-    for (int i = 0; task_running_.load() && i < 100; ++i)
-    {
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
 }
 
 void app::control_task()
@@ -285,7 +251,7 @@ void app::control_task()
     uint32_t n = 0;
     TickType_t wake = xTaskGetTickCount();
 
-    for (; running_.load();)
+    for (;;)
     {
         if (xTaskDelayUntil(&wake, pdMS_TO_TICKS(k_loop_ms)) == pdFALSE)
         {
@@ -511,8 +477,6 @@ void app::control_task()
         st_.loop_max_ms = loop_max_ms;
         st_.mag_cal_running = mag_cal;
     }
-    bts_.deinit();
-    deadman_.set_en_gpio(-1);
 }
 
 void app::send(char dir, uint16_t func, const std::vector<uint8_t>& payload)
@@ -929,32 +893,32 @@ void app::load_params()
 
 struct Applet::Impl
 {
-    std::shared_ptr<app> instance;
+    // Lives for the program: the control task and the reactor hold it.
+    app* instance = nullptr;
 };
 
 Applet::Applet() : impl_(std::make_unique<Impl>()) {}
-Applet::~Applet() { stop(); }
+Applet::~Applet() = default;
 
 bool Applet::configure(const config& cfg)
 {
-    stop();
-    impl_->instance = std::make_shared<app>(cfg);
-    if (!impl_->instance->configure())
+    if (impl_->instance)
     {
-        impl_->instance.reset();
+        return false;  // configured once, for the life of the program
+    }
+    auto* a = new app(cfg);
+    if (!a->configure())
+    {
+        delete a;
         return false;
     }
+    impl_->instance = a;
     return true;
 }
 
 bool Applet::start()
 {
     return impl_->instance && impl_->instance->start();
-}
-
-void Applet::stop()
-{
-    if (impl_->instance) impl_->instance->stop();
 }
 
 }  // namespace rover_sample

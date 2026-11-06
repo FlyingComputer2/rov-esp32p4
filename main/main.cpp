@@ -12,11 +12,12 @@
 // Upstream 0 is clock sync (krono SynchClient, UDP console 5110) and upstream
 // 2 the bandwidth tester (app_bwtest, UDP console 5100), both on L3-owned
 // queues. Upstream 3 is rover_sample (RC car: RC in, telemetry out, MSP v2;
-// UDP console 5120), also on an L3-owned queue. Upstreams 7 and 8 carry the
-// tester's and the clock-sync client's consoles to the ground (mplane_relay,
-// one loopback socket per ground client). The radio m-plane stays on UDP
-// loopback. App and C6 updates go over the SDIO proxy's udp_ota (UDP 3232),
-// on Ethernet or over the air through upstream 9.
+// UDP console 5120), also on an L3-owned queue. Upstreams 7 and 8 are the
+// tester's and the clock-sync client's m-planes, served directly on their
+// L3-owned queues (request in, reply out; no socket). The radio m-plane
+// stays on UDP loopback. App and C6 updates go over the SDIO proxy's udp_ota
+// (UDP 3232), on Ethernet or over the air through upstream 9 (a static UDP
+// upstream to 127.0.0.1:3232).
 
 #include <inttypes.h>
 #include <pthread.h>
@@ -47,7 +48,6 @@
 #include "esp_timer.h"
 #include "app_kit.hpp"
 #include "applets.hpp"
-#include "mplane_relay_applet.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -120,17 +120,12 @@ constexpr size_t k_synch_upstream = 0;
 constexpr const char* k_synch_console = "0.0.0.0:5110";
 constexpr int k_synch_pulse_gpio = 20;
 
-/* Upstreams 7 and 8: the tester's and the clock-sync client's consoles over
- * the air, on L3-owned queues. The ground serves them to operators on UDP
- * 5102 / 5112 and tags each request with a client id; mplane_relay sends it
- * from that client's own loopback socket, so the reply finds its way back. */
+/* Upstreams 7 and 8: the tester's and the clock-sync client's m-planes over
+ * the air, on L3-owned queues served directly by their applets (the same
+ * commands as their UDP consoles). The ground is a udp_server on 5102 /
+ * 5112: replies go to the last sender, one operator at a time. */
 constexpr size_t k_bwtest_mplane_upstream = 7;
-constexpr const char* k_bwtest_mplane_target = "127.0.0.1:5100";
 constexpr size_t k_synch_mplane_upstream = 8;
-constexpr const char* k_synch_mplane_target = "127.0.0.1:5110";
-/* Upstream 9: udp_ota over the air, relayed the same way (ground UDP 2430). */
-constexpr size_t k_ota_upstream = 9;
-constexpr const char* k_ota_target = "127.0.0.1:3232";
 
 /* Upstream 3: rover_sample's L3-owned queue (RC from the ground, telemetry
  * back). Its sensors share the board I2C with the camera SCCB and the codec:
@@ -277,6 +272,39 @@ bool queue_receive(winject::UpstreamQueue& up, std::vector<uint8_t>* out)
  * (failsafe). Threads its callbacks create set their own settings. */
 constexpr app_kit::thread_spec k_apps_thread {"apps", 6 * 1024, 10, -1, app_kit::stack_in::psram, false};
 
+/* The applets, for the life of the program. */
+applets::BwtestApplet g_bwtest;
+applets::SynchClientApplet g_synch;
+
+/* An L3-owned queue as an app_kit datagram link. */
+app_kit::datagrams queue_link(std::shared_ptr<winject::UpstreamQueue> up)
+{
+    app_kit::datagrams link;
+    link.send = [up](const uint8_t* data, size_t len) { return up->try_send(data, len); };
+    link.receive = [up](std::vector<uint8_t>* out) { return queue_receive(*up, out); };
+    return link;
+}
+
+/* An applet's m-plane over the air: its L3-owned queue served directly. */
+void start_mplane(size_t index, std::shared_ptr<winject::UpstreamQueue> up)
+{
+    static std::atomic<uint32_t> started {0};
+    const uint32_t bit = 1u << index;
+    if (started.fetch_or(bit) & bit)
+    {
+        ESP_LOGW(TAG, "m-plane upstream %u replaced; restart to rebind it", (unsigned)index);
+        return;
+    }
+    if (index == k_bwtest_mplane_upstream)
+    {
+        g_bwtest.set_mplane(queue_link(std::move(up)));
+    }
+    else if (index == k_synch_mplane_upstream)
+    {
+        g_synch.set_mplane(queue_link(std::move(up)));
+    }
+}
+
 /* The bandwidth tester on its upstream's queue:
  * console on UDP 5100. */
 void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
@@ -288,7 +316,7 @@ void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
         return;
     }
     started = true;
-    static applets::BwtestApplet applet;
+    applets::BwtestApplet& applet = g_bwtest;
     applets::bwtest_config cfg;
     cfg.console = k_bwtest_console;
     if (!applet.configure(std::move(up), cfg) || !applet.start())
@@ -316,7 +344,7 @@ void start_synch(std::shared_ptr<winject::UpstreamQueue> up)
         return;
     }
     started = true;
-    static applets::SynchClientApplet applet;
+    applets::SynchClientApplet& applet = g_synch;
     applets::synch_client_config cfg;
     cfg.console = k_synch_console;
     cfg.options.pulse = krono::make_gpio_pulse(k_synch_pulse_gpio);
@@ -349,34 +377,6 @@ void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
         printf("ROVER_SAMPLE_EXIT rc=1\n");
         fflush(stdout);
     }
-}
-
-/* A local console relayed over its upstream's queue (mplane_relay applet on
- * the app reactor). */
-void start_mplane_relay(size_t index, std::shared_ptr<winject::UpstreamQueue> up,
-                        const char* name, const char* target)
-{
-    static std::atomic<uint32_t> started {0};
-    static std::unique_ptr<mplane_relay::Applet> applets[32];
-    const uint32_t bit = 1u << index;
-    if (started.fetch_or(bit) & bit)
-    {
-        ESP_LOGW(TAG, "%s upstream replaced; restart to rebind the relay", name);
-        return;
-    }
-    mplane_relay::AppletConfig cfg;
-    cfg.name = name;
-    cfg.relay.target = target;
-    mplane_relay::Transport transport;
-    transport.send = [up](const uint8_t* data, size_t len) { return up->try_send(data, len); };
-    transport.receive = [up](std::vector<uint8_t>* out) { return queue_receive(*up, out); };
-    auto applet = std::make_unique<mplane_relay::Applet>();
-    if (!applet->configure(cfg, std::move(transport)) || !applet->start())
-    {
-        printf("ROVER_RELAY_EXIT %s rc=1\n", name);
-        return;
-    }
-    applets[index] = std::move(applet);
 }
 
 /* The board I2C (camera SCCB, ES8311, rover_sample's GY-521 / GY-271). Kept
@@ -426,17 +426,9 @@ void* run_l3(void*)
         {
             start_rover_sample(std::move(up));
         }
-        else if (index == k_bwtest_mplane_upstream)
+        else if (index == k_bwtest_mplane_upstream || index == k_synch_mplane_upstream)
         {
-            start_mplane_relay(index, std::move(up), "bw_relay", k_bwtest_mplane_target);
-        }
-        else if (index == k_synch_mplane_upstream)
-        {
-            start_mplane_relay(index, std::move(up), "synch_relay", k_synch_mplane_target);
-        }
-        else if (index == k_ota_upstream)
-        {
-            start_mplane_relay(index, std::move(up), "ota_relay", k_ota_target);
+            start_mplane(index, std::move(up));
         }
     };
     std::string err;

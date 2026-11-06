@@ -54,6 +54,9 @@ struct config
     int control_prio = 16;
 };
 
+// rover_sample as an applet: configure() loads the parameters and finds the
+// reactor; start() starts the control task and registers the link poll and
+// the console on the reactor. Lives for the life of the program (no stop).
 class Applet
 {
 public:
@@ -61,9 +64,11 @@ public:
     ~Applet();
     Applet(const Applet&) = delete;
     Applet& operator=(const Applet&) = delete;
+    // False when there is no I2C bus or no such reactor (once only).
     bool configure(const config& cfg);
+    // False when the control task or the console cannot be started.
     bool start();
-    void stop();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
