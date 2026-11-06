@@ -38,6 +38,7 @@
 #include "WinjectL3.h"
 #include "synch/SynchGpio.h"
 #include "core/thread_spawn.hpp"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_eth.h"
 #include "esp_event.h"
@@ -517,6 +518,59 @@ void run_video()
     }
 }
 
+/* Indicator LED for the glass-to-glass check: lit for 100 ms every 1000 ms
+ * (the first lit at 1 s after boot). GPIO22 is not the C6 boot strap on this
+ * board (that is GPIO47, see app_main). Driven from esp_timer, not from the
+ * L3 or video threads. */
+constexpr gpio_num_t k_led_gpio = GPIO_NUM_22;
+constexpr int64_t k_led_period_us = 1000 * 1000;
+constexpr int64_t k_led_on_us = 100 * 1000;
+esp_timer_handle_t g_led_off_timer = nullptr;
+
+void led_off_cb(void*)
+{
+    gpio_set_level(k_led_gpio, 0);
+}
+
+void led_on_cb(void*)
+{
+    gpio_set_level(k_led_gpio, 1);
+    esp_timer_start_once(g_led_off_timer, k_led_on_us);
+}
+
+esp_err_t start_led_blink()
+{
+    gpio_config_t io = {};
+    io.pin_bit_mask = 1ULL << k_led_gpio;
+    io.mode = GPIO_MODE_OUTPUT;
+    esp_err_t err = gpio_config(&io);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    gpio_set_level(k_led_gpio, 0);
+
+    esp_timer_create_args_t off_args = {};
+    off_args.callback = led_off_cb;
+    off_args.name = "led_off";
+    err = esp_timer_create(&off_args, &g_led_off_timer);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    esp_timer_create_args_t on_args = {};
+    on_args.callback = led_on_cb;
+    on_args.name = "led_on";
+    esp_timer_handle_t on_timer = nullptr;
+    err = esp_timer_create(&on_args, &on_timer);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    return esp_timer_start_periodic(on_timer, k_led_period_us);
+}
+
 /* vstreamer pipeline control needs a pthread, not app_main; run_live_tx blocks. */
 void start_video()
 {
@@ -538,6 +592,12 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* Indicator LED on GPIO22, 100 ms in every 1000 ms. */
+    if (start_led_blink() != ESP_OK)
+    {
+        printf("ROVER_LED_FAILED\n");
+    }
 
     err = start_ethernet();
     if (err != ESP_OK)
