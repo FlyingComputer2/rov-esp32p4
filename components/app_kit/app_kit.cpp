@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -128,27 +129,120 @@ void watch(reactor_t& r, int fd, std::function<void()> fn)
     post(r, [rp, fd, boxed] { rp->add_read_rdy(fd, [boxed] { (*boxed)(); }); });
 }
 
-bool queue_console(reactor_t& r, datagrams link, std::function<std::string(const std::string& line)> handle,
-                   uint32_t poll_ms, size_t max_batch)
+namespace
 {
-    if (!link.send || !link.receive || !handle)
+
+/* Bound to a from_l3 queue with set_reactor(): the queue calls wake_up() on
+ * every push (on L3's thread); this posts the applet's drain onto its
+ * reactor, once until it has run. */
+struct drain_waker : std::enable_shared_from_this<drain_waker>
+{
+    reactor_t* reactor = nullptr;
+    std::shared_ptr<queue_t> queue;
+    std::function<void()> on_data;
+    std::atomic<bool> pending {false};
+
+    void wake_up()
     {
+        if (pending.exchange(true))
+        {
+            return;
+        }
+        auto self = shared_from_this();
+        reactor->wake_up([self] { self->drain(); });
+    }
+
+    void drain()
+    {
+        pending.store(false);
+        on_data();
+        /* on_data took at most k_max_batch: come back for the rest after the
+         * reactor's other ready work. */
+        if (queue->size() > 0)
+        {
+            wake_up();
+        }
+    }
+};
+
+}  // namespace
+
+bool add_upstream_queues(const upstream_names& names, size_t capacity)
+{
+    for (const std::string* name : {&names.to_l3, &names.from_l3})
+    {
+        auto q = std::make_shared<queue_t>();
+        q->set_capacity(capacity);
+        if (!queue_registry::get_instance().add(*name, q))
+        {
+            ESP_LOGE(TAG, "queue %s already registered", name->c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool find_upstream_queues(const upstream_names& names, upstream_queues* out)
+{
+    out->to_l3 = queue_registry::get_instance().get(names.to_l3);
+    out->from_l3 = queue_registry::get_instance().get(names.from_l3);
+    if (!out->to_l3 || !out->from_l3)
+    {
+        ESP_LOGE(TAG, "no queues %s / %s", names.to_l3.c_str(), names.from_l3.c_str());
         return false;
     }
-    every(r, poll_ms,
-                 [link = std::move(link), handle = std::move(handle), max_batch]
-                 {
-                     std::vector<uint8_t> req;
-                     for (size_t i = 0; i < max_batch && link.receive(&req); ++i)
-                     {
-                         const std::string reply = handle(std::string(req.begin(), req.end()));
-                         if (!reply.empty())
-                         {
-                             link.send(reinterpret_cast<const uint8_t*>(reply.data()), reply.size());
-                         }
-                     }
-                 });
     return true;
+}
+
+datagrams link(const upstream_queues& q)
+{
+    datagrams d;
+    d.send = [to = q.to_l3](const uint8_t* data, size_t len)
+    {
+        to->push(bfc::shared_sized_buffer::copy_from(data, len));
+        return true;
+    };
+    d.receive = [from = q.from_l3](std::vector<uint8_t>* out)
+    {
+        auto packet = from->pop();
+        if (!packet)
+        {
+            return false;
+        }
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
+        out->assign(p, p + packet->size());
+        return true;
+    };
+    return d;
+}
+
+void on_receive(reactor_t& r, const upstream_queues& q, std::function<void()> on_data)
+{
+    auto waker = std::make_shared<drain_waker>();
+    waker->reactor = &r;
+    waker->queue = q.from_l3;
+    waker->on_data = std::move(on_data);
+    q.from_l3->set_reactor(waker);
+    /* Anything queued before the binding. */
+    waker->wake_up();
+}
+
+void queue_console(reactor_t& r, const upstream_queues& q,
+                   std::function<std::string(const std::string& line)> handle)
+{
+    on_receive(r, q,
+               [l = link(q), handle = std::move(handle)]
+               {
+                   std::vector<uint8_t> req;
+                   for (size_t i = 0; i < k_max_batch && l.receive(&req); ++i)
+                   {
+                       const std::string reply = handle(std::string(req.begin(), req.end()));
+                       if (!reply.empty())
+                       {
+                           l.send(reinterpret_cast<const uint8_t*>(reply.data()), reply.size());
+                       }
+                   }
+               });
 }
 
 bool udp_console(reactor_t& r, const std::string& host_port,

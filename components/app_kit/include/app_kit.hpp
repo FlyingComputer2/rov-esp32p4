@@ -22,6 +22,8 @@
 #include <vector>
 
 #include <bfc/default_reactor.hpp>
+#include <bfc/event_queue.hpp>
+#include <bfc/shared_sized_buffer.hpp>
 
 #include "esp_pthread.h"
 
@@ -108,11 +110,50 @@ struct datagrams
     std::function<bool(std::vector<uint8_t>* out)> receive;
 };
 
-// An m-plane served directly on a datagram transport (an L3 upstream, no
-// socket): every poll_ms up to max_batch requests are taken from it and each
-// one's non-empty reply sent back on it. False if link is incomplete.
-bool queue_console(reactor_t& r, datagrams link, std::function<std::string(const std::string& line)> handle,
-                   uint32_t poll_ms = 2, size_t max_batch = k_max_batch);
+// ---- Named L3 upstream queues --------------------------------------------
+//
+// An app upstream is an L3 QUEUE_FORWARDING upstream on two named queues in
+// bfc's queue registry: its `rx` (to_l3, the app pushes, L3 consumes on its
+// reactor) and its `tx` (from_l3, L3 pushes, the applet consumes). The host
+// registers them before winject-l3 starts; an applet finds them by name. A
+// push into from_l3 wakes the applet's reactor (no polling).
+
+using queue_t = bfc::reactive_circular_lossy_queue<bfc::shared_sized_buffer>;
+using queue_registry = bfc::cv_reactor_circular_lossy_queue_registry<bfc::shared_sized_buffer>;
+
+struct upstream_names
+{
+    std::string to_l3;    // the upstream's `rx` in the L3 config
+    std::string from_l3;  // the upstream's `tx`
+};
+
+struct upstream_queues
+{
+    std::shared_ptr<queue_t> to_l3;
+    std::shared_ptr<queue_t> from_l3;
+};
+
+// Host: registers both queues with this capacity (datagrams; a full queue
+// drops its oldest). False if a name is taken.
+bool add_upstream_queues(const upstream_names& names, size_t capacity);
+
+// Applets: the queues by name; false (and logged) if either is missing.
+bool find_upstream_queues(const upstream_names& names, upstream_queues* out);
+
+// The queues as a datagram transport.
+datagrams link(const upstream_queues& q);
+
+// Calls on_data on r's thread whenever q.from_l3 gets data, for the life of
+// the program. on_data takes at most k_max_batch datagrams; while some are
+// left it is called again (after the reactor's other ready work). One
+// consumer per queue.
+void on_receive(reactor_t& r, const upstream_queues& q, std::function<void()> on_data);
+
+// An m-plane served directly on an upstream (no socket): each request
+// datagram from q.from_l3 is handled on r's thread and its non-empty reply
+// pushed to q.to_l3.
+void queue_console(reactor_t& r, const upstream_queues& q,
+                   std::function<std::string(const std::string& line)> handle);
 
 // Calls fn on r's thread while fd is readable, for the life of the program
 // (from any thread). fn should read at most k_max_batch datagrams per call.

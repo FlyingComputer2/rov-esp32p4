@@ -148,6 +148,8 @@ class app
     config cfg_;
     i2c_master_bus_handle_t bus_ = nullptr;
     std::shared_ptr<app_kit::reactor_t> reactor_;
+    app_kit::upstream_queues link_q_;
+    app_kit::datagrams wire_;  // the RC upstream (link_ is the RC link state)
     bool configured_ = false;
     mpu6050 imu_;
     magnetometer mag_;
@@ -186,6 +188,11 @@ bool app::configure()
         ESP_LOGE(TAG, "no reactor %s", cfg_.reactor.c_str());
         return false;
     }
+    if (!app_kit::find_upstream_queues(cfg_.link, &link_q_))
+    {
+        return false;
+    }
+    wire_ = app_kit::link(link_q_);
 
     load_params();
     configured_ = true;
@@ -215,7 +222,8 @@ bool app::start()
     {
         return false;
     }
-    app_kit::every(*reactor_, cfg_.link_poll_ms, [this] { poll_link(); });
+    app_kit::on_receive(*reactor_, link_q_, [this] { poll_link(); });
+    app_kit::every(*reactor_, cfg_.link_tick_ms, [this] { poll_link(); });
     printf("rover_sample: console %s, RC/telemetry MSP v2 on the link (reactor %s)\n", cfg_.console.c_str(),
            cfg_.reactor.c_str());
     return true;
@@ -482,9 +490,9 @@ void app::control_task()
 void app::send(char dir, uint16_t func, const std::vector<uint8_t>& payload)
 {
     const auto wire = msp::encode(dir, func, payload);
-    if (cfg_.link.send)
+    if (wire_.send)
     {
-        cfg_.link.send(wire.data(), wire.size());
+        wire_.send(wire.data(), wire.size());
     }
 }
 
@@ -596,7 +604,7 @@ void app::send_telem()
 
 void app::poll_link()
 {
-    while (cfg_.link.receive && cfg_.link.receive(&link_buf_))
+    for (size_t i = 0; i < app_kit::k_max_batch && wire_.receive(&link_buf_); ++i)
     {
         msp::frame f;
         if (msp::decode(link_buf_.data(), link_buf_.size(), &f))
