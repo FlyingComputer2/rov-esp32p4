@@ -67,9 +67,8 @@ constexpr size_t k_l3_stack_bytes = 16 * 1024;
 /* Core for the winject-l3 thread; see start_l3(). */
 constexpr int k_l3_cpu = 1;
 
-/* Threads winject-l3 starts itself (its upstream reactor). These are the
- * settings they used to get by inheriting the clock-sync client's config,
- * which that client's start left on the l3 thread; only the name is new. */
+/* The L3 upstream reactor handles queues and sockets on a PSRAM stack.
+ * The L3 main thread reads its config from flash on an internal stack. */
 constexpr size_t k_l3_child_stack_bytes = 6 * 1024;
 constexpr int k_l3_child_prio = 12;
 
@@ -77,22 +76,15 @@ constexpr int k_l3_child_prio = 12;
  * stack is unusable while the cache is off) or is timing-critical: internal
  * RAM is what live TX runs short of (~10-20 KB left once the 1080p encoder
  * holds its reference frame). */
-enum class stack_in
-{
-    psram,
-    internal,
-};
-
-/* The default config with a name, stack, priority, stack memory and
- * inheritance. Unpinned. */
-esp_pthread_cfg_t thread_cfg(const char* name, size_t stack, int prio, stack_in mem, bool inherit = false)
+/* Configure an unpinned pthread with a PSRAM stack. */
+esp_pthread_cfg_t psram_thread_cfg(const char* name, size_t stack, int prio, bool inherit = false)
 {
     esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
     cfg.thread_name = name;
     cfg.stack_size = stack;
     cfg.prio = prio;
     cfg.inherit_cfg = inherit;
-    cfg.stack_alloc_caps = (mem == stack_in::psram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL) | MALLOC_CAP_8BIT;
+    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     return cfg;
 }
 
@@ -342,7 +334,7 @@ void create_apps_reactor()
  * (as winject-l3's thread, see start_l3). */
 void run_apps_reactor()
 {
-    esp_pthread_cfg_t cfg = thread_cfg("apps", 6 * 1024, 10, stack_in::psram);
+    esp_pthread_cfg_t cfg = psram_thread_cfg("apps", 6 * 1024, 10);
     cfg.pin_to_core = 1;
     const scoped_pthread_cfg scope(cfg);
     std::thread([r = g_apps] { r->run(); }).detach();
@@ -358,7 +350,7 @@ void start_applets()
     bw.reactor = k_apps_reactor;
     bw.data = k_bwtest_up.names;
     /* test_send's sender: low priority so video wins. */
-    bw.sender = thread_cfg("bwtest", 6 * 1024, 5, stack_in::psram);
+    bw.sender = psram_thread_cfg("bwtest", 6 * 1024, 5);
     bw.mplane = k_bwtest_mplane_up.names;
     bw.console = k_bwtest_console;
     if (!bwtest.configure(bw) || !bwtest.start())
@@ -373,7 +365,7 @@ void start_applets()
     sc.data = k_synch_up.names;
     /* Priority 12 so its timestamps are taken on time; it sleeps between 1 ms
      * polls, so it costs video little. */
-    sc.worker = thread_cfg("synch", 6 * 1024, 12, stack_in::psram);
+    sc.worker = psram_thread_cfg("synch", 6 * 1024, 12);
     sc.mplane = k_synch_mplane_up.names;
     sc.console = k_synch_console;
     sc.options.pulse = krono::make_gpio_pulse(k_synch_pulse_gpio);
@@ -427,7 +419,7 @@ void* run_l3(void*)
     /* For the threads winject-l3 starts; the upstream callbacks below set
      * their own for their threads and restore this one. */
     const esp_pthread_cfg_t child =
-        thread_cfg("l3_up", k_l3_child_stack_bytes, k_l3_child_prio, stack_in::internal, true);
+        psram_thread_cfg("l3_up", k_l3_child_stack_bytes, k_l3_child_prio, true);
     esp_pthread_set_cfg(&child);
     winject::Config cfg;
     std::string err;
@@ -528,8 +520,10 @@ void run_video()
 /* vstreamer pipeline control needs a pthread, not app_main; run_live_tx blocks. */
 void start_video()
 {
-    vstreamer::spawn_thread(vstreamer::thread_opts {"rover_video", 12 * 1024}, run_video)
-        .detach();
+    // The supervisor's stack is in PSRAM. Video workers choose their own stacks.
+    const auto cfg = psram_thread_cfg("rover_video", 12 * 1024, CONFIG_PTHREAD_TASK_PRIO_DEFAULT);
+    const scoped_pthread_cfg scope(cfg);
+    std::thread(run_video).detach();
 }
 
 }  // namespace
