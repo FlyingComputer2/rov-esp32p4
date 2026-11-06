@@ -12,11 +12,11 @@ endif()
 include(FetchContent)
 # The three share bfc's queue and reactor registries, so they must build
 # against one bfc: FetchContent keeps the first declaration, and this one
-# comes before theirs. It is ahead of their pins (f6fe978) for the fd
+# comes before theirs. It is ahead of their pins (f6fe978): bfc master, for the fd
 # reactors' queue support the applets use; bump theirs to match.
 FetchContent_Declare(bfc
     GIT_REPOSITORY https://github.com/therooftopprinz/BFC.git
-    GIT_TAG 0bd45a15e62e353e1e922022bf60e4d710126afa
+    GIT_TAG 1f732b19927dbe2c7092b2c93181ff21042d0781
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
