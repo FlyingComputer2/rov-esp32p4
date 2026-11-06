@@ -309,7 +309,14 @@ void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
         return;
     }
     started = true;
-    const scoped_pthread_cfg scope(thread_cfg("bwtest", 6 * 1024, 5, true));
+    esp_pthread_cfg_t cfg = thread_cfg("bwtest", 6 * 1024, 5, true);
+    /* PSRAM stacks (inherited by its sender and receive poller): internal RAM
+     * is what live TX runs short of. Once video runs only ~10 KB of internal
+     * RAM is left; with these and the relays on internal stacks, live TX could
+     * not create its threads and the rover boot-looped. The tester only does
+     * socket and queue I/O, never flash. */
+    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    const scoped_pthread_cfg scope(cfg);
     std::thread(
         [up = std::move(up)]
         {
@@ -426,7 +433,11 @@ void start_mplane_relay(size_t index, std::shared_ptr<winject::UpstreamQueue> up
         ESP_LOGW(TAG, "%s upstream replaced; restart to rebind the relay", name);
         return;
     }
-    const scoped_pthread_cfg scope(thread_cfg(name, 4 * 1024, 5, false));
+    esp_pthread_cfg_t cfg = thread_cfg(name, 4 * 1024, 5, false);
+    /* PSRAM stack: internal RAM is what live TX runs short of (see
+     * start_bwtest). A relay only does socket I/O, never flash. */
+    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    const scoped_pthread_cfg scope(cfg);
     std::thread(
         [up = std::move(up), name, target]
         {
@@ -546,6 +557,17 @@ void start_l3()
     {
         ESP_LOGE(TAG, "winject-l3 thread: %d", err);
     }
+}
+
+/* Free heap in bytes: internal RAM is what live TX runs short of (its
+ * threads' stacks and the 1080p encoder's reference frame). */
+void print_heap(const char* when)
+{
+    printf("ROVER_HEAP %s internal=%u internal_largest=%u psram=%u\n", when,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    fflush(stdout);
 }
 
 void print_stats()
@@ -671,6 +693,7 @@ extern "C" void app_main(void)
         {
             start_l3();
         }
+        print_heap("before_video");
         start_video();
     }
     printf("ROVER_READY\n");
@@ -680,5 +703,6 @@ extern "C" void app_main(void)
     {
         vTaskDelay(pdMS_TO_TICKS(10000));
         print_stats();
+        print_heap("stats");
     }
 }
