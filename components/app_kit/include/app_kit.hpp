@@ -7,10 +7,10 @@
 // udp_console / every / post). Sockets wake the reactor when readable;
 // reactor timers drain the L3-owned queues.
 //
-// The reactor is bfc::default_reactor (poll_reactor on ESP-IDF). It uses
-// std::function callbacks because poll_reactor's removal path captures a
-// callback inside another callback, which cannot fit in bfc's fixed-size
-// light_function. The helpers here also box callers' larger callables.
+// The reactor is bfc::default_reactor<> (poll_reactor on ESP-IDF, callbacks
+// are bfc::large_function: 64 bytes inline, no allocation per callback) in
+// bfc::default_reactor_registry. The helpers here box callers' larger
+// callables.
 #pragma once
 
 #include <cstddef>
@@ -30,9 +30,8 @@
 namespace app_kit
 {
 
-using reactor_t = bfc::default_reactor<std::function<void()>>;
-using reactor_tag = bfc::object_tag<reactor_t>;
-using reactor_registry = bfc::object_registry<reactor_tag>;
+using reactor_t = bfc::default_reactor<>;
+using reactor_registry = bfc::default_reactor_registry;
 
 // The board's app reactor (main.cpp starts it).
 constexpr const char* k_apps_reactor = "apps";
