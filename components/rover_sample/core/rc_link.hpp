@@ -1,6 +1,7 @@
 // RC frame intake: source arbitration and per-second link statistics.
 // The rover follows one source; another takes over only after the current
-// one has been silent for failsafe_ms. Loss comes from seq gaps, latency from
+// one has been silent for failsafe_ms, and a source silent that long starts
+// over (any seq: its sender may have restarted). Loss comes from seq gaps, latency from
 // the sender's t_us against the rover's own clock (both krono-synced).
 #pragma once
 

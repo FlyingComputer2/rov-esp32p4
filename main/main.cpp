@@ -9,12 +9,13 @@
 //   winject-l3 <--wifi_rx-- proxy <- SDIO <- C6     (radio.dplane_rx)
 //   vstreamer --video_tx--> winject-l3 upstream 1   (upstream-1.rx)
 //   vstreamer <--video_rx-- winject-l3 upstream 1   (upstream-1.tx)
-// Upstream 0 is clock sync (krono SynchClient, UDP console 5110) and upstream
-// 2 the bandwidth tester (app_bwtest, UDP console 5100), both on L3-owned
-// queues. Upstream 3 is rover_sample (RC car: RC in, telemetry out, MSP v2;
-// UDP console 5120), also on an L3-owned queue. Upstreams 7 and 8 are the
+// Upstream 0 is clock sync (krono SynchClient, UDP console 5110), 2 the
+// bandwidth tester (app_bwtest, UDP console 5100) and 3 rover_sample (RC car:
+// RC in, telemetry out, MSP v2; UDP console 5120). Upstreams 7 and 8 are the
 // tester's and the clock-sync client's m-planes, served directly on their
-// L3-owned queues (request in, reply out; no socket). The radio m-plane
+// queues (request in, reply out; no socket). All five are on named queues
+// registered here (L3's side on rover_dp) and run as applets on one shared
+// reactor, "apps" (see start_applets). The radio m-plane
 // stays on UDP loopback. App and C6 updates go over the SDIO proxy's udp_ota
 // (UDP 3232), on Ethernet or over the air through upstream 9 (a static UDP
 // upstream to 127.0.0.1:3232).

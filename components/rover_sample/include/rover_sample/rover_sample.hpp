@@ -45,8 +45,10 @@ struct config
     // UDP console, one command per datagram, reply to the sender.
     std::string console = "0.0.0.0:5120";
     // RC frames are handled as they arrive (50 Hz); this tick runs the
-    // failsafe, the console RC hold (50 Hz) and telemetry (telem_hz).
-    uint32_t link_tick_ms = 10;
+    // failsafe, the console RC hold (50 Hz) and telemetry (telem_hz, 20 Hz).
+    // Each tick is a reactor wake-up (a poll() pass on ESP-IDF): at 10 ms the
+    // reactor took 5.4% of a core.
+    uint32_t link_tick_ms = 20;
     // The 250 Hz control task (FreeRTOS, PSRAM stack).
     int control_core = 1;
     int control_prio = 16;
