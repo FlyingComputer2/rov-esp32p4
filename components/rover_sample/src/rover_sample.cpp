@@ -1,5 +1,8 @@
 #include "rover_sample/rover_sample.hpp"
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
 #include <time.h>
 #include <unistd.h>
 
@@ -8,6 +11,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -15,7 +19,9 @@
 #include <thread>
 
 #include "ahrs.hpp"
-#include "app_kit.hpp"
+#include <bfc/default_reactor.hpp>
+#include <bfc/event_queue.hpp>
+#include <bfc/shared_sized_buffer.hpp>
 #include "controller.hpp"
 #include "drivers.hpp"
 #include "esp_log.h"
@@ -147,9 +153,13 @@ class app
 
     config cfg_;
     i2c_master_bus_handle_t bus_ = nullptr;
-    std::shared_ptr<app_kit::reactor_t> reactor_;
-    app_kit::upstream_queues link_q_;
-    app_kit::datagrams wire_;  // the RC upstream (link_ is the RC link state)
+    using reactor_t = bfc::default_reactor<>;
+    using queue_t = bfc::reactive_circular_lossy_queue<bfc::shared_sized_buffer>;
+    std::shared_ptr<reactor_t> reactor_;
+    // The RC upstream's queues (link_ is the RC link state).
+    std::shared_ptr<queue_t> to_l3_, from_l3_;
+    void arm_tick();
+    void console_readable(int fd);
     bool configured_ = false;
     mpu6050 imu_;
     magnetometer mag_;
@@ -182,17 +192,20 @@ bool app::configure()
         ESP_LOGE(TAG, "no I2C%d bus: create it before rover_sample configure", cfg_.pin.i2c_port);
         return false;
     }
-    reactor_ = app_kit::find_reactor(cfg_.reactor);
+    reactor_ = bfc::default_reactor_registry::get_instance().get(cfg_.reactor);
     if (!reactor_)
     {
         ESP_LOGE(TAG, "no reactor %s", cfg_.reactor.c_str());
         return false;
     }
-    if (!app_kit::find_upstream_queues(cfg_.link, &link_q_))
+    using queues = bfc::cv_reactor_circular_lossy_queue_registry<bfc::shared_sized_buffer>;
+    to_l3_ = queues::get_instance().get(cfg_.link_to_l3);
+    from_l3_ = queues::get_instance().get(cfg_.link_from_l3);
+    if (!to_l3_ || !from_l3_)
     {
+        ESP_LOGE(TAG, "no queues %s / %s", cfg_.link_to_l3.c_str(), cfg_.link_from_l3.c_str());
         return false;
     }
-    wire_ = app_kit::link(link_q_);
 
     load_params();
     configured_ = true;
@@ -209,7 +222,7 @@ bool app::start()
      * stacks internal (20 KB left) live TX fell to ~20 fps, its sender and FEC
      * ~5x slower; on PSRAM stacks it runs at 29 fps as without rover_sample.
      * So the control task's stack is in PSRAM (the app reactor's is too, see
-     * app_kit) and only NVS access borrows an internal one
+     * the host's) and only NVS access borrows an internal one
      * (on_internal_stack). */
     if (xTaskCreatePinnedToCoreWithCaps(control_trampoline, "rs_control", 6 * 1024, this, cfg_.control_prio,
                                         nullptr, cfg_.control_core, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) !=
@@ -218,12 +231,28 @@ bool app::start()
         ESP_LOGE(TAG, "control task not created");
         return false;
     }
-    if (!app_kit::udp_console(*reactor_, cfg_.console, [this](const std::string& line) { return command(line); }))
+    /* The console socket. */
+    const size_t colon = cfg_.console.rfind(':');
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(std::atoi(cfg_.console.c_str() + colon + 1)));
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (colon == std::string::npos || addr.sin_port == 0 ||
+        inet_pton(AF_INET, cfg_.console.substr(0, colon).c_str(), &addr.sin_addr) != 1 || fd < 0 ||
+        bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0)
     {
+        ESP_LOGE(TAG, "cannot bind console %s", cfg_.console.c_str());
+        if (fd >= 0)
+        {
+            close(fd);
+        }
         return false;
     }
-    app_kit::on_receive(*reactor_, link_q_, [this] { poll_link(); });
-    app_kit::every(*reactor_, cfg_.link_tick_ms, [this] { poll_link(); });
+    reactor_->add_read_rdy(fd, [this, fd] { console_readable(fd); });
+    /* RC as it arrives (a push wakes the reactor), and the tick. */
+    reactor_->add_read_rdy(*from_l3_, [this] { poll_link(); });
+    from_l3_->set_reactor(reactor_);
+    arm_tick();
     printf("rover_sample: console %s, RC/telemetry MSP v2 on the link (reactor %s)\n", cfg_.console.c_str(),
            cfg_.reactor.c_str());
     return true;
@@ -490,9 +519,9 @@ void app::control_task()
 void app::send(char dir, uint16_t func, const std::vector<uint8_t>& payload)
 {
     const auto wire = msp::encode(dir, func, payload);
-    if (wire_.send)
+    if (to_l3_)
     {
-        wire_.send(wire.data(), wire.size());
+        to_l3_->push(bfc::shared_sized_buffer::copy_from(wire.data(), wire.size()));
     }
 }
 
@@ -602,10 +631,51 @@ void app::send_telem()
     send(msp::k_from_rover, k_func_telem, pack(t));
 }
 
+// The failsafe, console RC hold and telemetry tick: a one-shot timer re-armed
+// each time.
+void app::arm_tick()
+{
+    reactor_->get_timer().wait_ms(cfg_.link_tick_ms,
+                                  [this]
+                                  {
+                                      poll_link();
+                                      arm_tick();
+                                  });
+}
+
+// The console: one command per datagram, the reply to its sender, up to 16
+// per pass.
+void app::console_readable(int fd)
+{
+    for (int i = 0; i < 16; ++i)
+    {
+        char buf[256];
+        sockaddr_in from {};
+        socklen_t from_len = sizeof(from);
+        const ssize_t n =
+            recvfrom(fd, buf, sizeof(buf) - 1, MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&from), &from_len);
+        if (n <= 0)
+        {
+            return;
+        }
+        buf[n] = '\0';
+        const std::string reply = command(buf);
+        sendto(fd, reply.data(), reply.size(), 0, reinterpret_cast<const sockaddr*>(&from), from_len);
+    }
+}
+
 void app::poll_link()
 {
-    for (size_t i = 0; i < app_kit::k_max_batch && wire_.receive(&link_buf_); ++i)
+    // At most 16 per pass; the reactor comes back for the rest.
+    for (size_t i = 0; i < 16; ++i)
     {
+        auto packet = from_l3_->pop();
+        if (!packet)
+        {
+            break;
+        }
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
+        link_buf_.assign(p, p + packet->size());
         msp::frame f;
         if (msp::decode(link_buf_.data(), link_buf_.size(), &f))
         {

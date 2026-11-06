@@ -15,7 +15,7 @@ include(FetchContent)
 # comes before theirs. Keep it equal to their pins.
 FetchContent_Declare(bfc
     GIT_REPOSITORY https://github.com/therooftopprinz/BFC.git
-    GIT_TAG 59056e8a1c59b35cf9bbb3e08e3ec9df98e91a76
+    GIT_TAG 38b4f3fc1d85e279761b97d43d3e0eb57fbd9991
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git

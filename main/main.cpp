@@ -46,7 +46,6 @@
 #include "esp_pthread.h"
 #include "esp_spiffs.h"
 #include "esp_timer.h"
-#include "app_kit.hpp"
 #include "applets.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -72,6 +71,54 @@ constexpr int k_l3_cpu = 1;
  * which that client's start left on the l3 thread; only the name is new. */
 constexpr size_t k_l3_child_stack_bytes = 6 * 1024;
 constexpr int k_l3_child_prio = 12;
+
+/* Thread policy. Stacks go to PSRAM unless a thread writes flash (a PSRAM
+ * stack is unusable while the cache is off) or is timing-critical: internal
+ * RAM is what live TX runs short of (~10-20 KB left once the 1080p encoder
+ * holds its reference frame). */
+enum class stack_in
+{
+    psram,
+    internal,
+};
+
+/* The default config with a name, stack, priority, stack memory and
+ * inheritance. Unpinned. */
+esp_pthread_cfg_t thread_cfg(const char* name, size_t stack, int prio, stack_in mem, bool inherit = false)
+{
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.thread_name = name;
+    cfg.stack_size = stack;
+    cfg.prio = prio;
+    cfg.inherit_cfg = inherit;
+    cfg.stack_alloc_caps = (mem == stack_in::psram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL) | MALLOC_CAP_8BIT;
+    return cfg;
+}
+
+/* esp_pthread_set_cfg() applies to every thread the calling thread creates
+ * next. Sets cfg for this scope, then restores the previous config, or the
+ * default when there was none, so it cannot leak into the caller's later
+ * threads. */
+class scoped_pthread_cfg
+{
+public:
+    explicit scoped_pthread_cfg(const esp_pthread_cfg_t& cfg)
+        : had_prev(esp_pthread_get_cfg(&prev) == ESP_OK)
+    {
+        esp_pthread_set_cfg(&cfg);
+    }
+    ~scoped_pthread_cfg()
+    {
+        const esp_pthread_cfg_t restore = had_prev ? prev : esp_pthread_get_default_config();
+        esp_pthread_set_cfg(&restore);
+    }
+    scoped_pthread_cfg(const scoped_pthread_cfg&) = delete;
+    scoped_pthread_cfg& operator=(const scoped_pthread_cfg&) = delete;
+
+private:
+    esp_pthread_cfg_t prev {};
+    bool had_prev;
+};
 
 /* Registry names; config/winject.conf names the same ones. */
 constexpr const char* k_dp_reactor = "rover_dp";
@@ -110,7 +157,7 @@ constexpr int k_video_mplane_port = 5090;
 /* The applets' upstreams (config/winject.conf): QUEUE_FORWARDING on named
  * queues (`rx` = <name>_tx, the app's send side; `tx` = <name>_rx), L3's side
  * on reactor rover_dp. main.cpp registers them before winject-l3 starts; the
- * applets find them by name and are woken when L3 pushes (app_kit).
+ * applets find them by name and are woken when L3 pushes.
  *   0 clock sync (krono client)        synch_tx / synch_rx
  *   2 bandwidth tester                 bwtest_tx / bwtest_rx
  *   3 rover_sample RC / telemetry      rc_tx / rc_rx
@@ -121,7 +168,7 @@ constexpr int k_video_mplane_port = 5090;
  * time). */
 struct app_upstream
 {
-    app_kit::upstream_names names;
+    applets::upstream_names names;
     size_t capacity;
 };
 const app_upstream k_synch_up {{"synch_tx", "synch_rx"}, 16};
@@ -167,6 +214,11 @@ bool register_queue(const char* name, size_t capacity)
     return true;
 }
 
+bool register_app_upstream(const app_upstream& u)
+{
+    return register_queue(u.names.to_l3.c_str(), u.capacity) && register_queue(u.names.from_l3.c_str(), u.capacity);
+}
+
 /* Registers the d-plane queues and reactor and runs the reactor, before the
  * proxy, winject-l3 and vstreamer bind them. All of it lives as long as the
  * program; nothing is unregistered. */
@@ -178,11 +230,9 @@ bool start_dplane_queues()
         !register_queue(k_wifi_rx, k_wifi_queue_capacity) ||
         !register_queue(k_video_tx, k_video_tx_capacity) ||
         !register_queue(k_video_rx, k_video_rx_capacity) ||
-        !app_kit::add_upstream_queues(k_synch_up.names, k_synch_up.capacity) ||
-        !app_kit::add_upstream_queues(k_bwtest_up.names, k_bwtest_up.capacity) ||
-        !app_kit::add_upstream_queues(k_rc_up.names, k_rc_up.capacity) ||
-        !app_kit::add_upstream_queues(k_bwtest_mplane_up.names, k_bwtest_mplane_up.capacity) ||
-        !app_kit::add_upstream_queues(k_synch_mplane_up.names, k_synch_mplane_up.capacity))
+        !register_app_upstream(k_synch_up) || !register_app_upstream(k_bwtest_up) ||
+        !register_app_upstream(k_rc_up) || !register_app_upstream(k_bwtest_mplane_up) ||
+        !register_app_upstream(k_synch_mplane_up))
     {
         return false;
     }
@@ -266,11 +316,36 @@ void on_ota_active(bool active, void*)
     }
 }
 
-/* The app reactor (app_kit, registered as app_kit::k_apps_reactor): the
- * applets below attach to it by name. Socket and queue callbacks only (no
- * flash), so a PSRAM stack; priority 10, as rover_sample's RC link loop had
- * (failsafe). Threads its callbacks create set their own settings. */
-constexpr app_kit::thread_spec k_apps_thread {"apps", 6 * 1024, 10, -1, app_kit::stack_in::psram, false};
+/* The app reactor, a bfc::default_reactor<> registered as "apps" in
+ * bfc::default_reactor_registry: the applets attach to it by name. Socket and
+ * queue callbacks only (no flash), so a PSRAM stack; priority 10, as
+ * rover_sample's RC link loop had (failsafe). Threads its callbacks create
+ * set their own settings. */
+constexpr const char* k_apps_reactor = "apps";
+std::shared_ptr<bfc::default_reactor<>> g_apps;
+
+void create_apps_reactor()
+{
+    g_apps = std::make_shared<bfc::default_reactor<>>();
+    if (!bfc::default_reactor_registry::get_instance().add(k_apps_reactor, g_apps))
+    {
+        printf("ROVER_APPS_REACTOR_FAILED\n");
+    }
+}
+
+/* After the applets registered their callbacks (registration is not
+ * thread-safe), for the life of the program. Pinned to core 1: left unpinned,
+ * the RISC-V port pins a task to the core it is on when it first uses the FPU
+ * (rover_sample's callbacks do), and on core 0 vs_isp_tx (priority 13, ~95%
+ * at 6 Mbit/s) starved it: the consoles went silent and RC telemetry stopped
+ * (as winject-l3's thread, see start_l3). */
+void run_apps_reactor()
+{
+    esp_pthread_cfg_t cfg = thread_cfg("apps", 6 * 1024, 10, stack_in::psram);
+    cfg.pin_to_core = 1;
+    const scoped_pthread_cfg scope(cfg);
+    std::thread([r = g_apps] { r->run(); }).detach();
+}
 
 /* Configures and starts the applets on the app reactor and their named
  * upstream queues, before winject-l3 starts (it binds the same queues). They
@@ -279,7 +354,10 @@ void start_applets()
 {
     static applets::BwtestApplet bwtest;
     applets::bwtest_config bw;
+    bw.reactor = k_apps_reactor;
     bw.data = k_bwtest_up.names;
+    /* test_send's sender: low priority so video wins. */
+    bw.sender = thread_cfg("bwtest", 6 * 1024, 5, stack_in::psram);
     bw.mplane = k_bwtest_mplane_up.names;
     bw.console = k_bwtest_console;
     if (!bwtest.configure(bw) || !bwtest.start())
@@ -290,7 +368,11 @@ void start_applets()
     /* rtt mode at first (`mode interrupt` on its console switches). */
     static applets::SynchClientApplet synch;
     applets::synch_client_config sc;
+    sc.reactor = k_apps_reactor;
     sc.data = k_synch_up.names;
+    /* Priority 12 so its timestamps are taken on time; it sleeps between 1 ms
+     * polls, so it costs video little. */
+    sc.worker = thread_cfg("synch", 6 * 1024, 12, stack_in::psram);
     sc.mplane = k_synch_mplane_up.names;
     sc.console = k_synch_console;
     sc.options.pulse = krono::make_gpio_pulse(k_synch_pulse_gpio);
@@ -304,7 +386,9 @@ void start_applets()
      * reactor. Needs the board I2C bus. */
     static rover_sample::Applet car;
     rover_sample::config rs;
-    rs.link = k_rc_up.names;
+    rs.reactor = k_apps_reactor;
+    rs.link_to_l3 = k_rc_up.names.to_l3;
+    rs.link_from_l3 = k_rc_up.names.from_l3;
     rs.console = k_rover_sample_console;
     rs.pin.i2c_port = k_board_i2c_port;
     if (!car.configure(rs) || !car.start())
@@ -341,8 +425,8 @@ void* run_l3(void*)
 {
     /* For the threads winject-l3 starts; the upstream callbacks below set
      * their own for their threads and restore this one. */
-    const esp_pthread_cfg_t child = app_kit::pthread_cfg(
-        {"l3_up", k_l3_child_stack_bytes, k_l3_child_prio, -1, app_kit::stack_in::internal, true});
+    const esp_pthread_cfg_t child =
+        thread_cfg("l3_up", k_l3_child_stack_bytes, k_l3_child_prio, stack_in::internal, true);
     esp_pthread_set_cfg(&child);
     winject::Config cfg;
     std::string err;
@@ -368,7 +452,7 @@ void start_l3()
 {
     esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
     cfg.pin_to_core = k_l3_cpu;
-    const app_kit::scoped_pthread_cfg scope(cfg);
+    const scoped_pthread_cfg scope(cfg);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, k_l3_stack_bytes);
@@ -467,10 +551,7 @@ extern "C" void app_main(void)
     }
 
     /* Before the applets, which attach to it by name. */
-    if (!app_kit::start_reactor(app_kit::k_apps_reactor, k_apps_thread))
-    {
-        printf("ROVER_APPS_REACTOR_FAILED\n");
-    }
+    create_apps_reactor();
 
     /* Before the proxy, whose udp_ota serves its files (ota_fs_*), and
      * whatever the queues do: a broken winject.conf can then still be
@@ -519,6 +600,7 @@ extern "C" void app_main(void)
     if (queues)
     {
         start_applets();
+        run_apps_reactor();
         if (config_err == ESP_OK)
         {
             start_l3();

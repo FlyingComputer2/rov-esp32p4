@@ -2,7 +2,7 @@
 // bridge, GY-521 (MPU-6050) and GY-271 (QMC5883L / HMC5883L) on the board's
 // shared I2C. RC in and telemetry out are MSP v2 frames over a datagram
 // transport (L3 upstream 3); tuning on a UDP console. The RC link and the
-// console run on a named app reactor (app_kit); only the 250 Hz control loop
+// console run on a named reactor (bfc::default_reactor_registry); only the 250 Hz control loop
 // has a task of its own.
 #pragma once
 
@@ -11,7 +11,6 @@
 #include <functional>
 #include <memory>
 
-#include "app_kit.hpp"
 #include <string>
 #include <vector>
 
@@ -34,11 +33,15 @@ struct pins
 
 struct config
 {
-    // The RC / telemetry upstream (L3 QUEUE_FORWARDING, named queues; app_kit).
-    app_kit::upstream_names link;
+    // The RC / telemetry upstream: an L3 QUEUE_FORWARDING upstream on two
+    // named queues in bfc's queue registry (its rx = link_to_l3, tx =
+    // link_from_l3).
+    std::string link_to_l3;
+    std::string link_from_l3;
     pins pin;
-    // The app reactor (app_kit) the RC link and the console run on.
-    std::string reactor = "apps";
+    // The reactor (bfc::default_reactor_registry) the RC link and the console
+    // run on; start() registers on it before its thread runs.
+    std::string reactor;
     // UDP console, one command per datagram, reply to the sender.
     std::string console = "0.0.0.0:5120";
     // RC frames are handled as they arrive (50 Hz); this tick runs the
