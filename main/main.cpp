@@ -9,20 +9,23 @@
 //   winject-l3 <--wifi_rx-- proxy <- SDIO <- C6     (radio.dplane_rx)
 //   vstreamer --video_tx--> winject-l3 upstream 1   (upstream-1.rx)
 //   vstreamer <--video_rx-- winject-l3 upstream 1   (upstream-1.tx)
-// Upstream 0 is clock sync (krono SynchClient, UDP console 5110) and upstream
-// 2 the bandwidth tester (app_bwtest, UDP console 5100), both on L3-owned
-// queues. Upstream 3 is rover_sample (RC car: RC in, telemetry out, MSP v2;
-// UDP console 5120), also on an L3-owned queue. Upstreams 7 and 8 carry the
-// tester's and the clock-sync client's consoles to the ground (mplane_relay,
-// one loopback socket per ground client). The radio m-plane stays on UDP
-// loopback. App and C6 updates go over the SDIO proxy's udp_ota (UDP 3232),
-// on Ethernet or over the air through upstream 9.
+// Upstream 0 is clock sync (krono SynchClient, UDP console 5110), 2 the
+// bandwidth tester (app_bwtest, UDP console 5100) and 3 rover_sample (RC car:
+// RC in, telemetry out, MSP v2; UDP console 5120). Upstreams 7 and 8 are the
+// tester's and the clock-sync client's m-planes, served directly on their
+// queues (request in, reply out; no socket). All five are on named queues
+// registered here (L3's side on rover_dp) and run as applets on one shared
+// reactor, "apps" (see start_applets). The radio m-plane
+// stays on UDP loopback. App and C6 updates go over the SDIO proxy's udp_ota
+// (UDP 3232), on Ethernet or over the air through upstream 9 (a static UDP
+// upstream to 127.0.0.1:3232).
 
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -33,7 +36,6 @@
 #include <bfc/shared_sized_buffer.hpp>
 
 #include "WinjectL3.h"
-#include "apps/bwtest/Bwtest.h"
 #include "synch/SynchGpio.h"
 #include "core/thread_spawn.hpp"
 #include "driver/i2c_master.h"
@@ -44,7 +46,8 @@
 #include "esp_heap_caps.h"
 #include "esp_pthread.h"
 #include "esp_spiffs.h"
-#include "mplane_relay.hpp"
+#include "esp_timer.h"
+#include "applets.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -64,12 +67,34 @@ constexpr size_t k_l3_stack_bytes = 16 * 1024;
 /* Core for the winject-l3 thread; see start_l3(). */
 constexpr int k_l3_cpu = 1;
 
-/* Threads winject-l3 starts itself (its upstream reactor, which delivers the
- * L3-owned queues of upstreams 0, 2, 3, 7, 8 and 9). These are the settings they used
- * to get by inheriting the clock-sync client's config, which start_synch()
- * left on the l3 thread; only the name is new. */
+/* Threads winject-l3 starts itself (its upstream reactor). These are the
+ * settings they used to get by inheriting the clock-sync client's config,
+ * which that client's start left on the l3 thread; only the name is new. */
 constexpr size_t k_l3_child_stack_bytes = 6 * 1024;
 constexpr int k_l3_child_prio = 12;
+
+/* Thread policy. Stacks go to PSRAM unless a thread writes flash (a PSRAM
+ * stack is unusable while the cache is off) or is timing-critical: internal
+ * RAM is what live TX runs short of (~10-20 KB left once the 1080p encoder
+ * holds its reference frame). */
+enum class stack_in
+{
+    psram,
+    internal,
+};
+
+/* The default config with a name, stack, priority, stack memory and
+ * inheritance. Unpinned. */
+esp_pthread_cfg_t thread_cfg(const char* name, size_t stack, int prio, stack_in mem, bool inherit = false)
+{
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.thread_name = name;
+    cfg.stack_size = stack;
+    cfg.prio = prio;
+    cfg.inherit_cfg = inherit;
+    cfg.stack_alloc_caps = (mem == stack_in::psram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL) | MALLOC_CAP_8BIT;
+    return cfg;
+}
 
 /* esp_pthread_set_cfg() applies to every thread the calling thread creates
  * next. Sets cfg for this scope, then restores the previous config, or the
@@ -85,15 +110,8 @@ public:
     }
     ~scoped_pthread_cfg()
     {
-        if (had_prev)
-        {
-            esp_pthread_set_cfg(&prev);
-        }
-        else
-        {
-            const esp_pthread_cfg_t def = esp_pthread_get_default_config();
-            esp_pthread_set_cfg(&def);
-        }
+        const esp_pthread_cfg_t restore = had_prev ? prev : esp_pthread_get_default_config();
+        esp_pthread_set_cfg(&restore);
     }
     scoped_pthread_cfg(const scoped_pthread_cfg&) = delete;
     scoped_pthread_cfg& operator=(const scoped_pthread_cfg&) = delete;
@@ -102,17 +120,6 @@ private:
     esp_pthread_cfg_t prev {};
     bool had_prev;
 };
-
-/* The default config with a name, stack, priority and inheritance. Unpinned. */
-esp_pthread_cfg_t thread_cfg(const char* name, size_t stack, int prio, bool inherit)
-{
-    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
-    cfg.thread_name = name;
-    cfg.stack_size = stack;
-    cfg.prio = prio;
-    cfg.inherit_cfg = inherit;
-    return cfg;
-}
 
 /* Registry names; config/winject.conf names the same ones. */
 constexpr const char* k_dp_reactor = "rover_dp";
@@ -148,37 +155,41 @@ constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 1
  * pauses and resumes live TX. */
 constexpr int k_video_mplane_port = 5090;
 
-/* Upstream 2 in config/winject.conf: the bandwidth tester's L3-owned queue. */
-constexpr size_t k_bwtest_upstream = 2;
+/* The applets' upstreams (config/winject.conf): QUEUE_FORWARDING on named
+ * queues (`rx` = <name>_tx, the app's send side; `tx` = <name>_rx), L3's side
+ * on reactor rover_dp. main.cpp registers them before winject-l3 starts; the
+ * applets find them by name and are woken when L3 pushes.
+ *   0 clock sync (krono client)        synch_tx / synch_rx
+ *   2 bandwidth tester                 bwtest_tx / bwtest_rx
+ *   3 rover_sample RC / telemetry      rc_tx / rc_rx
+ *   7 tester m-plane                   bwtest_mp_tx / bwtest_mp_rx
+ *   8 clock-sync m-plane               synch_mp_tx / synch_mp_rx
+ * 7 and 8 serve the same commands as the UDP consoles; the ground is a
+ * udp_server on 5102 / 5112 (replies to the last sender, one operator at a
+ * time). */
+struct app_upstream
+{
+    applets::upstream_names names;
+    size_t capacity;
+};
+const app_upstream k_synch_up {{"synch_tx", "synch_rx"}, 16};
+const app_upstream k_bwtest_up {{"bwtest_tx", "bwtest_rx"}, 256};
+const app_upstream k_rc_up {{"rc_tx", "rc_rx"}, 16};
+const app_upstream k_bwtest_mplane_up {{"bwtest_mp_tx", "bwtest_mp_rx"}, 16};
+const app_upstream k_synch_mplane_up {{"synch_mp_tx", "synch_mp_rx"}, 16};
+
 constexpr const char* k_bwtest_console = "0.0.0.0:5100";
 
-/* Upstream 0: the clock-sync client's L3-owned queue; the ground P4 is the
- * server and its clock the reference. Interrupt mode pulses GPIO20 (header
- * pin 13, GND on pin 14), open drain, active low, to the ground's GPIO20
- * (JP1 pin 17). */
-constexpr size_t k_synch_upstream = 0;
+/* The clock-sync client: the ground P4 is the server and its clock the
+ * reference. Interrupt mode pulses GPIO20 (header pin 13, GND on pin 14),
+ * open drain, active low, to the ground's GPIO20 (JP1 pin 17). */
 constexpr const char* k_synch_console = "0.0.0.0:5110";
 constexpr int k_synch_pulse_gpio = 20;
 
-/* Upstreams 7 and 8: the tester's and the clock-sync client's consoles over
- * the air, on L3-owned queues. The ground serves them to operators on UDP
- * 5102 / 5112 and tags each request with a client id; mplane_relay sends it
- * from that client's own loopback socket, so the reply finds its way back. */
-constexpr size_t k_bwtest_mplane_upstream = 7;
-constexpr const char* k_bwtest_mplane_target = "127.0.0.1:5100";
-constexpr size_t k_synch_mplane_upstream = 8;
-constexpr const char* k_synch_mplane_target = "127.0.0.1:5110";
-/* Upstream 9: udp_ota over the air, relayed the same way (ground UDP 2430). */
-constexpr size_t k_ota_upstream = 9;
-constexpr const char* k_ota_target = "127.0.0.1:3232";
-
-/* Upstream 3: rover_sample's L3-owned queue (RC from the ground, telemetry
- * back). Its sensors share the board I2C with the camera SCCB and the codec:
- * GPIO7 SDA / GPIO8 SCL (header pins 3 / 5, ESP_I2C_SDA / _SCL), board
+/* rover_sample: its sensors share the board I2C with the camera SCCB and the
+ * codec: GPIO7 SDA / GPIO8 SCL (header pins 3 / 5, ESP_I2C_SDA / _SCL), board
  * pull-ups 2.2 k. This file creates the bus before video starts; the camera
  * source then uses it instead of creating (and on teardown deleting) its own. */
-constexpr size_t k_rover_sample_upstream = 3;
-
 /* udp_ota (in the SDIO proxy): the proxy's tools/udp_ota.py <rover IP>:3232
  * on Ethernet; over the air the ground's UDP 2430 reaches it through upstream
  * 9 (config/winject.conf). It updates this app and the C6, and serves the
@@ -204,6 +215,11 @@ bool register_queue(const char* name, size_t capacity)
     return true;
 }
 
+bool register_app_upstream(const app_upstream& u)
+{
+    return register_queue(u.names.to_l3.c_str(), u.capacity) && register_queue(u.names.from_l3.c_str(), u.capacity);
+}
+
 /* Registers the d-plane queues and reactor and runs the reactor, before the
  * proxy, winject-l3 and vstreamer bind them. All of it lives as long as the
  * program; nothing is unregistered. */
@@ -214,7 +230,10 @@ bool start_dplane_queues()
         !register_queue(k_wifi_tx, k_wifi_queue_capacity) ||
         !register_queue(k_wifi_rx, k_wifi_queue_capacity) ||
         !register_queue(k_video_tx, k_video_tx_capacity) ||
-        !register_queue(k_video_rx, k_video_rx_capacity))
+        !register_queue(k_video_rx, k_video_rx_capacity) ||
+        !register_app_upstream(k_synch_up) || !register_app_upstream(k_bwtest_up) ||
+        !register_app_upstream(k_rc_up) || !register_app_upstream(k_bwtest_mplane_up) ||
+        !register_app_upstream(k_synch_mplane_up))
     {
         return false;
     }
@@ -298,168 +317,86 @@ void on_ota_active(bool active, void*)
     }
 }
 
-/* Runs app_bwtest on its upstream's queue. Its sender and receive poller
- * inherit this thread's settings: low priority, unpinned, so video wins. */
-void start_bwtest(std::shared_ptr<winject::UpstreamQueue> up)
+/* The app reactor, a bfc::default_reactor<> registered as "apps" in
+ * bfc::default_reactor_registry: the applets attach to it by name. Socket and
+ * queue callbacks only (no flash), so a PSRAM stack; priority 10, as
+ * rover_sample's RC link loop had (failsafe). Threads its callbacks create
+ * set their own settings. */
+constexpr const char* k_apps_reactor = "apps";
+std::shared_ptr<bfc::default_reactor<>> g_apps;
+
+void create_apps_reactor()
 {
-    static bool started = false;
-    if (started)
+    g_apps = std::make_shared<bfc::default_reactor<>>();
+    if (!bfc::default_reactor_registry::get_instance().add(k_apps_reactor, g_apps))
     {
-        ESP_LOGW(TAG, "bwtest upstream replaced; restart to rebind the tester");
-        return;
+        printf("ROVER_APPS_REACTOR_FAILED\n");
     }
-    started = true;
-    esp_pthread_cfg_t cfg = thread_cfg("bwtest", 6 * 1024, 5, true);
-    /* PSRAM stacks (inherited by its sender and receive poller): internal RAM
-     * is what live TX runs short of. Once video runs only ~10 KB of internal
-     * RAM is left; with these and the relays on internal stacks, live TX could
-     * not create its threads and the rover boot-looped. The tester only does
-     * socket and queue I/O, never flash. */
-    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+}
+
+/* After the applets registered their callbacks (registration is not
+ * thread-safe), for the life of the program. Pinned to core 1: left unpinned,
+ * the RISC-V port pins a task to the core it is on when it first uses the FPU
+ * (rover_sample's callbacks do), and on core 0 vs_isp_tx (priority 13, ~95%
+ * at 6 Mbit/s) starved it: the consoles went silent and RC telemetry stopped
+ * (as winject-l3's thread, see start_l3). */
+void run_apps_reactor()
+{
+    esp_pthread_cfg_t cfg = thread_cfg("apps", 6 * 1024, 10, stack_in::psram);
+    cfg.pin_to_core = 1;
     const scoped_pthread_cfg scope(cfg);
-    std::thread(
-        [up = std::move(up)]
-        {
-            app_bwtest::Config bw;
-            bw.upstream = up;
-            bw.console = k_bwtest_console;
-            const int rc = app_bwtest::main(bw);
-            printf("ROVER_BWTEST_EXIT rc=%d\n", rc);
-            fflush(stdout);
-        })
-        .detach();
+    std::thread([r = g_apps] { r->run(); }).detach();
 }
 
-/* krono's datagram transport over an L3-owned upstream queue. */
-krono::Transport synch_transport(std::shared_ptr<winject::UpstreamQueue> up)
+/* Configures and starts the applets on the app reactor and their named
+ * upstream queues, before winject-l3 starts (it binds the same queues). They
+ * live for the program. */
+void start_applets()
 {
-    return krono::Transport {
-        [up](const uint8_t* data, size_t len) { return up->try_send(data, len); },
-        [up](std::vector<uint8_t>* out)
-        {
-            auto packet = up->receive();
-            if (!packet)
-            {
-                return false;
-            }
-            const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
-            out->assign(p, p + packet->size());
-            return true;
-        }};
-}
-
-/* Runs the clock-sync client on its upstream's queue, rtt mode at first
- * (`mode interrupt` on its console switches). Priority 12, well above the
- * tester, so its timestamps are taken on time; it sleeps between 1 ms polls,
- * so it costs video little. */
-void start_synch(std::shared_ptr<winject::UpstreamQueue> up)
-{
-    static bool started = false;
-    if (started)
+    static applets::BwtestApplet bwtest;
+    applets::bwtest_config bw;
+    bw.reactor = k_apps_reactor;
+    bw.data = k_bwtest_up.names;
+    /* test_send's sender: low priority so video wins. */
+    bw.sender = thread_cfg("bwtest", 6 * 1024, 5, stack_in::psram);
+    bw.mplane = k_bwtest_mplane_up.names;
+    bw.console = k_bwtest_console;
+    if (!bwtest.configure(bw) || !bwtest.start())
     {
-        ESP_LOGW(TAG, "synch upstream replaced; restart to rebind the client");
-        return;
+        printf("ROVER_BWTEST_EXIT rc=1\n");
     }
-    started = true;
-    const scoped_pthread_cfg scope(thread_cfg("synch", 6 * 1024, 12, true));
-    std::thread(
-        [up = std::move(up)]
-        {
-            krono::ClientConfig sc;
-            sc.transport = synch_transport(up);
-            sc.console = k_synch_console;
-            sc.options.pulse = krono::make_gpio_pulse(k_synch_pulse_gpio);
-            const int rc = krono::client_main(sc);
-            printf("ROVER_SYNCH_EXIT rc=%d\n", rc);
-            fflush(stdout);
-        })
-        .detach();
-}
 
-/* Runs rover_sample on its upstream's queue. Its link loop (2 ms polls) runs
- * on this thread at priority 10; its 250 Hz control task is a FreeRTOS task
- * on core 1 at priority 16, short per cycle (one 14-byte I2C read). Not
- * inherited: rover_sample sets its own console thread. */
-void start_rover_sample(std::shared_ptr<winject::UpstreamQueue> up)
-{
-    static bool started = false;
-    if (started)
+    /* rtt mode at first (`mode interrupt` on its console switches). */
+    static applets::SynchClientApplet synch;
+    applets::synch_client_config sc;
+    sc.reactor = k_apps_reactor;
+    sc.data = k_synch_up.names;
+    /* Priority 12 so its timestamps are taken on time; it sleeps between 1 ms
+     * polls, so it costs video little. */
+    sc.worker = thread_cfg("synch", 6 * 1024, 12, stack_in::psram);
+    sc.mplane = k_synch_mplane_up.names;
+    sc.console = k_synch_console;
+    sc.options.pulse = krono::make_gpio_pulse(k_synch_pulse_gpio);
+    if (!synch.configure(sc) || !synch.start())
     {
-        ESP_LOGW(TAG, "rover_sample upstream replaced; restart to rebind it");
-        return;
+        printf("ROVER_SYNCH_EXIT rc=1\n");
     }
-    started = true;
-    esp_pthread_cfg_t cfg = thread_cfg("rover_sample", 6 * 1024, 10, false);
-    /* PSRAM stack: internal RAM is what live TX runs short of (rover_sample
-     * moves its NVS access to a short-lived internal-stack thread). */
-    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    const scoped_pthread_cfg scope(cfg);
-    std::thread(
-        [up = std::move(up)]
-        {
-            rover_sample::config rs;
-            rs.link.send = [up](const uint8_t* data, size_t len) { return up->try_send(data, len); };
-            rs.link.receive = [up](std::vector<uint8_t>* out)
-            {
-                auto packet = up->receive();
-                if (!packet)
-                {
-                    return false;
-                }
-                const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
-                out->assign(p, p + packet->size());
-                return true;
-            };
-            rs.console = k_rover_sample_console;
-            rs.pin.i2c_port = k_board_i2c_port;
-            const int rc = rover_sample::main(rs);
-            printf("ROVER_SAMPLE_EXIT rc=%d\n", rc);
-            fflush(stdout);
-        })
-        .detach();
-}
 
-/* Relays a local console over its upstream's queue (mplane_relay). Low
- * priority and unpinned like the tester: m-plane traffic is a few datagrams
- * per operator command, and a 5 ms poll costs video nothing; an OTA (video
- * paused) is the only bulk user. */
-void start_mplane_relay(size_t index, std::shared_ptr<winject::UpstreamQueue> up,
-                        const char* name, const char* target)
-{
-    static std::atomic<uint32_t> started {0};
-    const uint32_t bit = 1u << index;
-    if (started.fetch_or(bit) & bit)
+    /* Its 250 Hz control task (core 1, priority 16, one 14-byte I2C read per
+     * cycle) is its own; its RC link and console (UDP 5120) are on the app
+     * reactor. Needs the board I2C bus. */
+    static rover_sample::Applet car;
+    rover_sample::config rs;
+    rs.reactor = k_apps_reactor;
+    rs.link_to_l3 = k_rc_up.names.to_l3;
+    rs.link_from_l3 = k_rc_up.names.from_l3;
+    rs.console = k_rover_sample_console;
+    rs.pin.i2c_port = k_board_i2c_port;
+    if (!car.configure(rs) || !car.start())
     {
-        ESP_LOGW(TAG, "%s upstream replaced; restart to rebind the relay", name);
-        return;
+        printf("ROVER_SAMPLE_EXIT rc=1\n");
     }
-    esp_pthread_cfg_t cfg = thread_cfg(name, 4 * 1024, 5, false);
-    /* PSRAM stack: internal RAM is what live TX runs short of (see
-     * start_bwtest). A relay only does socket I/O, never flash. */
-    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    const scoped_pthread_cfg scope(cfg);
-    std::thread(
-        [up = std::move(up), name, target]
-        {
-            mplane_relay::ClientConfig rc;
-            rc.send = [up](const uint8_t* data, size_t len) { return up->try_send(data, len); };
-            rc.receive = [up](std::vector<uint8_t>* out)
-            {
-                auto packet = up->receive();
-                if (!packet)
-                {
-                    return false;
-                }
-                const uint8_t* p = reinterpret_cast<const uint8_t*>(packet->data());
-                out->assign(p, p + packet->size());
-                return true;
-            };
-            rc.target = target;
-            const int rc_exit = mplane_relay::client_main(rc);
-            printf("ROVER_RELAY_EXIT %s rc=%d\n", name, rc_exit);
-            fflush(stdout);
-        })
-        .detach();
+    fflush(stdout);
 }
 
 /* The board I2C (camera SCCB, ES8311, rover_sample's GY-521 / GY-271). Kept
@@ -490,38 +427,9 @@ void* run_l3(void*)
     /* For the threads winject-l3 starts; the upstream callbacks below set
      * their own for their threads and restore this one. */
     const esp_pthread_cfg_t child =
-        thread_cfg("l3_up", k_l3_child_stack_bytes, k_l3_child_prio, true);
+        thread_cfg("l3_up", k_l3_child_stack_bytes, k_l3_child_prio, stack_in::internal, true);
     esp_pthread_set_cfg(&child);
     winject::Config cfg;
-    /* Set before load(): its validation needs the callback for an L3-owned
-     * queue upstream. */
-    cfg.on_upstream_queue = [](size_t index, std::shared_ptr<winject::UpstreamQueue> up)
-    {
-        if (index == k_bwtest_upstream)
-        {
-            start_bwtest(std::move(up));
-        }
-        else if (index == k_synch_upstream)
-        {
-            start_synch(std::move(up));
-        }
-        else if (index == k_rover_sample_upstream)
-        {
-            start_rover_sample(std::move(up));
-        }
-        else if (index == k_bwtest_mplane_upstream)
-        {
-            start_mplane_relay(index, std::move(up), "bw_relay", k_bwtest_mplane_target);
-        }
-        else if (index == k_synch_mplane_upstream)
-        {
-            start_mplane_relay(index, std::move(up), "synch_relay", k_synch_mplane_target);
-        }
-        else if (index == k_ota_upstream)
-        {
-            start_mplane_relay(index, std::move(up), "ota_relay", k_ota_target);
-        }
-    };
     std::string err;
     if (!cfg.load(k_config_path, &err))
     {
@@ -643,6 +551,9 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Ethernet: %s", esp_err_to_name(err));
     }
 
+    /* Before the applets, which attach to it by name. */
+    create_apps_reactor();
+
     /* Before the proxy, whose udp_ota serves its files (ota_fs_*), and
      * whatever the queues do: a broken winject.conf can then still be
      * replaced over Ethernet. */
@@ -689,6 +600,8 @@ extern "C" void app_main(void)
 
     if (queues)
     {
+        start_applets();
+        run_apps_reactor();
         if (config_err == ESP_OK)
         {
             start_l3();

@@ -308,6 +308,17 @@ void test_rc_link()
     CHECK(l.source() == k_src_phone);
     // Duplicates rejected.
     CHECK(!l.accept(other, now + 400100, rt, 300));
+    // ...and reordered frames, while the link is fresh.
+    rc_frame back = other;
+    back.seq = static_cast<uint16_t>(other.seq - 5);
+    CHECK(!l.accept(back, now + 400200, rt, 300));
+    // A restarted sender (seq from 0 again) is taken once the link has been
+    // silent for failsafe_ms.
+    rc_frame restart = other;
+    restart.seq = 0;
+    CHECK(l.accept(restart, now + 800000, rt, 300));
+    restart.seq = 1;
+    CHECK(l.accept(restart, now + 820000, rt, 300));
 }
 
 void test_gyro_cal_and_ahrs()

@@ -16,7 +16,10 @@ bool rc_link::accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uin
         ++rejected_;
         return false;
     }
-    if (have_ && rc.src == last_.src)
+    // The same source silent for failsafe_ms is a new link: its sender may
+    // have restarted, with seq from 0 again (behind the last one seen).
+    const bool fresh = have_ && now_us - last_us_ < int64_t(failsafe_ms) * 1000;
+    if (fresh && rc.src == last_.src)
     {
         const uint16_t d = static_cast<uint16_t>(rc.seq - last_.seq);
         if (d == 0 || d > 0x8000)

@@ -1,30 +1,26 @@
 // rover_sample: RC car on the rover P4. Steering servo, BTS7960 motor
 // bridge, GY-521 (MPU-6050) and GY-271 (QMC5883L / HMC5883L) on the board's
 // shared I2C. RC in and telemetry out are MSP v2 frames over a datagram
-// transport (L3 upstream 3); tuning on a UDP console.
+// transport (L3 upstream 3); tuning on a UDP console. The RC link and the
+// console run on a named reactor (bfc::default_reactor_registry); only the 250 Hz control loop
+// has a task of its own.
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
+
 #include <string>
 #include <vector>
 
 namespace rover_sample
 {
 
-// One datagram per call. send: false if not taken. receive: false when
-// nothing is queued (never blocks).
-struct transport
-{
-    std::function<bool(const uint8_t* data, size_t len)> send;
-    std::function<bool(std::vector<uint8_t>* out)> receive;
-};
-
 // Waveshare ESP32-P4-WIFI6-DEV-KIT 40-pin header (schematic, header P6).
 struct pins
 {
-    // I2C master bus the application created before main() (shared with the
+    // I2C master bus the host created before applet init (shared with the
     // camera SCCB and the codec: GPIO7 SDA, pin 3 / GPIO8 SCL, pin 5).
     int i2c_port = 0;
     int servo = 3;      // pin 19
@@ -37,18 +33,45 @@ struct pins
 
 struct config
 {
-    transport link;
+    // The RC / telemetry upstream: an L3 QUEUE_FORWARDING upstream on two
+    // named queues in bfc's queue registry (its rx = link_to_l3, tx =
+    // link_from_l3).
+    std::string link_to_l3;
+    std::string link_from_l3;
+    pins pin;
+    // The reactor (bfc::default_reactor_registry) the RC link and the console
+    // run on; start() registers on it before its thread runs.
+    std::string reactor;
     // UDP console, one command per datagram, reply to the sender.
     std::string console = "0.0.0.0:5120";
-    pins pin;
-    // The 250 Hz control task (FreeRTOS); the rest runs on the caller's
-    // thread and one console thread that inherits the caller's settings.
+    // RC frames are handled as they arrive (50 Hz); this tick runs the
+    // failsafe, the console RC hold (50 Hz) and telemetry (telem_hz, 20 Hz).
+    // Each tick is a reactor wake-up (a poll() pass on ESP-IDF): at 10 ms the
+    // reactor took 5.4% of a core.
+    uint32_t link_tick_ms = 20;
+    // The 250 Hz control task (FreeRTOS, PSRAM stack).
     int control_core = 1;
     int control_prio = 16;
 };
 
-// Runs until reset; returns 1 only when it cannot start (no I2C bus, bad
-// console address).
-int main(const config& cfg);
+// rover_sample as an applet: configure() loads the parameters and finds the
+// reactor; start() starts the control task and registers the link poll and
+// the console on the reactor. Lives for the life of the program (no stop).
+class Applet
+{
+public:
+    Applet();
+    ~Applet();
+    Applet(const Applet&) = delete;
+    Applet& operator=(const Applet&) = delete;
+    // False when there is no I2C bus or no such reactor (once only).
+    bool configure(const config& cfg);
+    // False when the control task or the console cannot be started.
+    bool start();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 }  // namespace rover_sample

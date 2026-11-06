@@ -12,7 +12,11 @@ idf_component_register(
          src/rover_sample.cpp
     INCLUDE_DIRS include
     PRIV_INCLUDE_DIRS core src
+    # applets: bfc's include path and the <poll.h> shim for bfc's reactor.
+    REQUIRES applets
     PRIV_REQUIRES esp_driver_i2c esp_driver_ledc esp_driver_gptimer esp_driver_gpio esp_adc
                   esp_timer nvs_flash lwip pthread esp_rom hal soc log
 )
-target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
+# bfc (the link queues, the reactor) throws on fatal errors; with IDF's C++
+# exceptions off a throw aborts.
+target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17 -fexceptions>)
