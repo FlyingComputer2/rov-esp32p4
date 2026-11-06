@@ -3,11 +3,9 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
@@ -15,12 +13,6 @@ namespace mplane_relay
 {
 namespace
 {
-
-int64_t now_ms()
-{
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
 
 bool parse_host_port(const std::string& s, sockaddr_in* out)
 {
@@ -42,156 +34,145 @@ bool parse_host_port(const std::string& s, sockaddr_in* out)
     return inet_pton(AF_INET, host.c_str(), &out->sin_addr) == 1;
 }
 
-struct Client
-{
-    int fd = -1;
-    uint8_t id = 0;
-    int64_t last_ms = 0;
-};
-
-void close_client(Client* c)
-{
-    if (c->fd >= 0)
-    {
-        close(c->fd);
-    }
-    c->fd = -1;
-}
-
 }  // namespace
 
-int client_main(const ClientConfig& cfg)
+Client::Client(ClientConfig cfg, Hooks hooks)
+    : m_cfg(std::move(cfg))
+    , m_hooks(std::move(hooks))
 {
     sockaddr_in target {};
-    if (!cfg.send || !cfg.receive || cfg.max_clients == 0 || cfg.max_datagram < 2 ||
-        !parse_host_port(cfg.target, &target))
+    m_ok = m_hooks.send_air && m_hooks.watch && m_hooks.unwatch && m_hooks.now_ms && m_cfg.max_clients > 0 &&
+           m_cfg.max_datagram >= 2 && parse_host_port(m_cfg.target, &target);
+    m_target.assign(reinterpret_cast<const uint8_t*>(&target), reinterpret_cast<const uint8_t*>(&target) + sizeof(target));
+    m_slots.resize(m_cfg.max_clients);
+    // Room for the id byte in front, and one byte more to detect a reply too
+    // long for one air datagram (recv truncates it).
+    m_buf.resize(m_cfg.max_datagram + 1);
+}
+
+Client::~Client()
+{
+    for (auto& s : m_slots)
     {
-        return 1;
+        close_slot(&s);
     }
-    std::vector<Client> clients(cfg.max_clients);
-    std::vector<uint8_t> air;
-    std::vector<uint8_t> buf(cfg.max_datagram);
-    Stats st;
+}
 
-    auto socket_for = [&](uint8_t id, int64_t now) -> Client*
+void Client::close_slot(Slot* s)
+{
+    if (s->fd >= 0)
     {
-        Client* lru = nullptr;
-        for (auto& c : clients)
-        {
-            if (c.fd >= 0 && c.id == id)
-            {
-                return &c;
-            }
-            if (!lru || c.fd < 0 || (lru->fd >= 0 && c.last_ms < lru->last_ms))
-            {
-                lru = &c;
-            }
-        }
-        if (lru->fd >= 0)
-        {
-            close_client(lru);
-            ++st.evicted;
-        }
-        const int fd = socket(AF_INET, SOCK_DGRAM, 0);
-        if (fd < 0)
-        {
-            return nullptr;
-        }
-        // connect(): the bound ephemeral port is this client's identity at the
-        // console, and only the console's replies arrive on it.
-        if (connect(fd, reinterpret_cast<const sockaddr*>(&target), sizeof(target)) != 0)
-        {
-            close(fd);
-            return nullptr;
-        }
-        lru->fd = fd;
-        lru->id = id;
-        lru->last_ms = now;
-        return lru;
-    };
+        m_hooks.unwatch(s->fd);
+        close(s->fd);
+    }
+    s->fd = -1;
+}
 
-    while (!cfg.stop || !cfg.stop->load())
+Client::Slot* Client::socket_for(uint8_t id, int64_t now)
+{
+    Slot* lru = nullptr;
+    for (auto& s : m_slots)
     {
-        const int64_t now = now_ms();
-        while (cfg.receive(&air))
+        if (s.fd >= 0 && s.id == id)
         {
-            if (air.size() < 2)
+            return &s;
+        }
+        if (!lru || s.fd < 0 || (lru->fd >= 0 && s.last_ms < lru->last_ms))
+        {
+            lru = &s;
+        }
+    }
+    if (lru->fd >= 0)
+    {
+        close_slot(lru);
+        ++m_stats.evicted;
+    }
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+    {
+        return nullptr;
+    }
+    // connect(): the bound ephemeral port is this client's identity at the
+    // console, and only the console's replies arrive on it.
+    if (connect(fd, reinterpret_cast<const sockaddr*>(m_target.data()), sizeof(sockaddr_in)) != 0)
+    {
+        close(fd);
+        return nullptr;
+    }
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    lru->fd = fd;
+    lru->id = id;
+    lru->last_ms = now;
+    m_hooks.watch(fd);
+    return lru;
+}
+
+void Client::on_air(const uint8_t* data, size_t len)
+{
+    if (!m_ok)
+    {
+        return;
+    }
+    if (len < 2)
+    {
+        ++m_stats.bad;
+        return;
+    }
+    const int64_t now = m_hooks.now_ms();
+    Slot* s = socket_for(data[0], now);
+    if (!s || send(s->fd, data + 1, len - 1, 0) < 0)
+    {
+        ++m_stats.send_fail;
+        return;
+    }
+    s->last_ms = now;
+    ++m_stats.requests;
+}
+
+void Client::on_readable(int fd)
+{
+    for (auto& s : m_slots)
+    {
+        if (s.fd != fd)
+        {
+            continue;
+        }
+        // Drain: the socket is non-blocking.
+        for (;;)
+        {
+            const ssize_t n = recv(fd, m_buf.data() + 1, m_cfg.max_datagram, 0);
+            if (n <= 0)
             {
-                ++st.bad;
+                return;
+            }
+            if (static_cast<size_t>(n) > m_cfg.max_datagram - 1)
+            {
+                ++m_stats.too_big;
                 continue;
             }
-            Client* c = socket_for(air[0], now);
-            if (!c || send(c->fd, air.data() + 1, air.size() - 1, 0) < 0)
+            m_buf[0] = s.id;
+            if (m_hooks.send_air(m_buf.data(), static_cast<size_t>(n) + 1))
             {
-                ++st.send_fail;
-                continue;
+                ++m_stats.replies;
             }
-            c->last_ms = now;
-            ++st.requests;
+            else
+            {
+                ++m_stats.send_fail;
+            }
         }
+    }
+}
 
-        fd_set rd;
-        FD_ZERO(&rd);
-        int maxfd = -1;
-        for (auto& c : clients)
-        {
-            if (c.fd >= 0 && now - c.last_ms > cfg.idle_ms)
-            {
-                close_client(&c);
-            }
-            if (c.fd >= 0)
-            {
-                FD_SET(c.fd, &rd);
-                maxfd = c.fd > maxfd ? c.fd : maxfd;
-            }
-        }
-        timeval tv {0, cfg.poll_ms * 1000};
-        if (maxfd < 0)
-        {
-            select(0, nullptr, nullptr, nullptr, &tv);
-        }
-        else if (select(maxfd + 1, &rd, nullptr, nullptr, &tv) > 0)
-        {
-            for (auto& c : clients)
-            {
-                if (c.fd < 0 || !FD_ISSET(c.fd, &rd))
-                {
-                    continue;
-                }
-                // Room for the id byte in front; a longer reply is truncated
-                // by recv, so read one byte more to detect it.
-                buf.resize(cfg.max_datagram + 1);
-                const ssize_t n = recv(c.fd, buf.data() + 1, cfg.max_datagram, 0);
-                if (n <= 0)
-                {
-                    continue;
-                }
-                if (static_cast<size_t>(n) > cfg.max_datagram - 1)
-                {
-                    ++st.too_big;
-                    continue;
-                }
-                buf[0] = c.id;
-                if (cfg.send(buf.data(), static_cast<size_t>(n) + 1))
-                {
-                    ++st.replies;
-                }
-                else
-                {
-                    ++st.send_fail;
-                }
-            }
-        }
-        if (cfg.on_stats)
-        {
-            cfg.on_stats(st);
-        }
-    }
-    for (auto& c : clients)
+void Client::tick()
+{
+    const int64_t now = m_hooks.now_ms();
+    for (auto& s : m_slots)
     {
-        close_client(&c);
+        if (s.fd >= 0 && now - s.last_ms > m_cfg.idle_ms)
+        {
+            close_slot(&s);
+        }
     }
-    return 0;
 }
 
 }  // namespace mplane_relay

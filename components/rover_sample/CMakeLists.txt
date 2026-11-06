@@ -12,6 +12,7 @@ idf_component_register(
          src/rover_sample.cpp
     INCLUDE_DIRS include
     PRIV_INCLUDE_DIRS core src
+    REQUIRES app_kit
     PRIV_REQUIRES esp_driver_i2c esp_driver_ledc esp_driver_gptimer esp_driver_gpio esp_adc
                   esp_timer nvs_flash lwip pthread esp_rom hal soc log
 )

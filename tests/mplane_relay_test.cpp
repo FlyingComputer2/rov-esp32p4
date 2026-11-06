@@ -1,19 +1,21 @@
 // Host test for components/mplane_relay: two ground clients share one local
-// request/response console, and each gets only its own replies.
+// request/response console, and each gets only its own replies. The test
+// plays the app reactor: it poll()s the sockets the relay asks to watch.
 
 #include "mplane_relay.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <deque>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,7 +23,8 @@
 namespace
 {
 
-// Console: replies "<request>@<sender port>" to the sender, like app_bwtest.
+// Console: replies "<request>@<sender port>" to the sender, like app_bwtest;
+// "big" gets a reply too long for one air datagram.
 struct Console
 {
     int fd = -1;
@@ -47,21 +50,13 @@ struct Console
             {
                 sockaddr_in src {};
                 socklen_t sl = sizeof(src);
-                const ssize_t n =
-                    recvfrom(fd, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&src), &sl);
+                const ssize_t n = recvfrom(fd, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&src), &sl);
                 if (n <= 0)
                 {
                     continue;
                 }
                 std::string reply(buf, static_cast<size_t>(n));
-                if (reply == "big")
-                {
-                    reply.assign(2000, 'x');
-                }
-                else
-                {
-                    reply += "@" + std::to_string(ntohs(src.sin_port));
-                }
+                reply = reply == "big" ? std::string(2000, 'x') : reply + "@" + std::to_string(ntohs(src.sin_port));
                 sendto(fd, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&src), sl);
             }
         });
@@ -74,35 +69,68 @@ struct Console
     }
 };
 
-struct Air
+int64_t now_ms()
 {
-    std::mutex mu;
-    std::deque<std::vector<uint8_t>> down;  // ground -> rover
-    std::deque<std::vector<uint8_t>> up;    // rover -> ground
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+struct Harness
+{
+    std::vector<int> watched;
+    std::deque<std::vector<uint8_t>> up;  // rover -> ground
+    int64_t clock_offset = 0;
+    mplane_relay::Client* relay = nullptr;
+
+    mplane_relay::Hooks hooks()
+    {
+        mplane_relay::Hooks h;
+        h.send_air = [this](const uint8_t* d, size_t n) {
+            up.emplace_back(d, d + n);
+            return true;
+        };
+        h.watch = [this](int fd) { watched.push_back(fd); };
+        h.unwatch = [this](int fd) { watched.erase(std::remove(watched.begin(), watched.end(), fd), watched.end()); };
+        h.now_ms = [this] { return now_ms() + clock_offset; };
+        return h;
+    }
 
     void request(uint8_t id, const std::string& s)
     {
         std::vector<uint8_t> d {id};
         d.insert(d.end(), s.begin(), s.end());
-        std::lock_guard<std::mutex> l(mu);
-        down.push_back(d);
+        relay->on_air(d.data(), d.size());
     }
-    bool reply(std::vector<uint8_t>* out)
+
+    // The reactor's job: poll the watched sockets until a reply is out or 1 s.
+    bool reply(std::vector<uint8_t>* out, int wait_ms = 1000)
     {
-        for (int i = 0; i < 200; ++i)
+        const int64_t until = now_ms() + wait_ms;
+        while (up.empty() && now_ms() < until)
         {
+            std::vector<pollfd> p;
+            for (int fd : watched)
             {
-                std::lock_guard<std::mutex> l(mu);
-                if (!up.empty())
+                p.push_back({fd, POLLIN, 0});
+            }
+            if (poll(p.data(), p.size(), 10) > 0)
+            {
+                for (auto& e : p)
                 {
-                    *out = up.front();
-                    up.pop_front();
-                    return true;
+                    if (e.revents & POLLIN)
+                    {
+                        relay->on_readable(e.fd);
+                    }
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        return false;
+        if (up.empty())
+        {
+            return false;
+        }
+        *out = up.front();
+        up.pop_front();
+        return true;
     }
 };
 
@@ -121,78 +149,64 @@ std::string port_of(const std::string& reply)
 int main()
 {
     Console console;
-    Air air;
-    std::atomic<bool> stop {false};
-    mplane_relay::Stats last;
-    std::mutex stats_mu;
-
+    Harness h;
     mplane_relay::ClientConfig cfg;
     cfg.target = "127.0.0.1:" + std::to_string(console.port);
     cfg.max_clients = 2;
-    cfg.max_datagram = 1445;
-    cfg.stop = &stop;
-    cfg.send = [&](const uint8_t* d, size_t n) {
-        std::lock_guard<std::mutex> l(air.mu);
-        air.up.emplace_back(d, d + n);
-        return true;
-    };
-    cfg.receive = [&](std::vector<uint8_t>* out) {
-        std::lock_guard<std::mutex> l(air.mu);
-        if (air.down.empty())
-        {
-            return false;
-        }
-        *out = air.down.front();
-        air.down.pop_front();
-        return true;
-    };
-    cfg.on_stats = [&](const mplane_relay::Stats& s) {
-        std::lock_guard<std::mutex> l(stats_mu);
-        last = s;
-    };
-    std::thread relay([&] { assert(mplane_relay::client_main(cfg) == 0); });
+    cfg.idle_ms = 1000;
+    mplane_relay::Client relay(cfg, h.hooks());
+    assert(relay.ok());
+    h.relay = &relay;
 
     std::vector<uint8_t> r;
 
     // Two clients: each reply carries its client's id and a distinct sender.
-    air.request(1, "stats");
-    assert(air.reply(&r) && r[0] == 1 && body(r).rfind("stats@", 0) == 0);
+    h.request(1, "stats");
+    assert(h.reply(&r) && r[0] == 1 && body(r).rfind("stats@", 0) == 0);
     const std::string port1 = port_of(body(r));
-    air.request(2, "stats");
-    assert(air.reply(&r) && r[0] == 2);
+    h.request(2, "stats");
+    assert(h.reply(&r) && r[0] == 2);
     const std::string port2 = port_of(body(r));
     assert(port1 != port2);
+    assert(h.watched.size() == 2);
 
     // Same client keeps its socket.
-    air.request(1, "clr");
-    assert(air.reply(&r) && r[0] == 1 && port_of(body(r)) == port1);
+    h.request(1, "clr");
+    assert(h.reply(&r) && r[0] == 1 && port_of(body(r)) == port1);
 
     // A reply too big for one air datagram is dropped and counted.
-    air.request(1, "big");
-    assert(!air.reply(&r));
+    h.request(1, "big");
+    assert(!h.reply(&r, 200));
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-    // A third client evicts the least recently used socket (client 2).
-    air.request(3, "status");
-    assert(air.reply(&r) && r[0] == 3);
-    air.request(1, "stats");
-    assert(air.reply(&r) && r[0] == 1 && port_of(body(r)) == port1);
+    // A third client evicts the least recently used socket (client 2), which
+    // is unwatched first.
+    h.request(3, "status");
+    assert(h.reply(&r) && r[0] == 3);
+    assert(h.watched.size() == 2);
+    h.request(1, "stats");
+    assert(h.reply(&r) && r[0] == 1 && port_of(body(r)) == port1);
 
     // Id byte only: rejected.
-    {
-        std::lock_guard<std::mutex> l(air.mu);
-        air.down.push_back({7});
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const uint8_t only_id = 7;
+    relay.on_air(&only_id, 1);
 
-    stop = true;
-    relay.join();
-    std::lock_guard<std::mutex> l(stats_mu);
-    assert(last.requests == 6);
-    assert(last.replies == 5);
-    assert(last.too_big == 1);
-    assert(last.evicted == 1);
-    assert(last.bad == 1);
+    // Idle sockets are closed by tick().
+    h.clock_offset = 5000;
+    relay.tick();
+    assert(h.watched.empty());
+
+    const auto& st = relay.stats();
+    assert(st.requests == 6);
+    assert(st.replies == 5);
+    assert(st.too_big == 1);
+    assert(st.evicted == 1);
+    assert(st.bad == 1);
+
+    // A bad target is refused.
+    mplane_relay::ClientConfig bad = cfg;
+    bad.target = "nonsense";
+    assert(!mplane_relay::Client(bad, h.hooks()).ok());
     std::printf("mplane_relay_test: ok\n");
     return 0;
 }

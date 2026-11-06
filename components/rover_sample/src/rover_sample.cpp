@@ -1,7 +1,5 @@
 #include "rover_sample/rover_sample.hpp"
 
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -17,6 +15,7 @@
 #include <thread>
 
 #include "ahrs.hpp"
+#include "app_kit.hpp"
 #include "controller.hpp"
 #include "drivers.hpp"
 #include "esp_log.h"
@@ -51,19 +50,6 @@ uint32_t realtime_us32()
     timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return static_cast<uint32_t>(static_cast<uint64_t>(ts.tv_sec) * 1000000ull + ts.tv_nsec / 1000);
-}
-
-bool parse_host_port(const std::string& s, sockaddr_in* out)
-{
-    const auto colon = s.rfind(':');
-    if (colon == std::string::npos)
-    {
-        return false;
-    }
-    *out = {};
-    out->sin_family = AF_INET;
-    out->sin_port = htons(static_cast<uint16_t>(std::atoi(s.c_str() + colon + 1)));
-    return inet_pton(AF_INET, s.substr(0, colon).c_str(), &out->sin_addr) == 1 && out->sin_port != 0;
 }
 
 // What the control task publishes each cycle.
@@ -135,24 +121,30 @@ struct status
     bool mag_cal_running = false;
 };
 
-class app
+class app : public std::enable_shared_from_this<app>
 {
    public:
     explicit app(const config& cfg) : cfg_(cfg) {}
-    int run();
+    bool configure();
+    bool start();
+    void stop();
+    // Reactor thread: drain RC, send telemetry when due; one console line.
+    void poll_link();
+    std::string command(const std::string& line);
 
    private:
     static void control_trampoline(void* arg)
     {
-        static_cast<app*>(arg)->control_task();
+        auto* self = static_cast<app*>(arg);
+        self->control_task();
+        self->task_running_.store(false);
+        self->control_keepalive_.reset();
+        vTaskDeleteWithCaps(nullptr);
     }
     void control_task();
-    void link_loop();
-    void console_loop(int fd);
     void handle_frame(const msp::frame& f);
     void send(char dir, uint16_t func, const std::vector<uint8_t>& payload);
     void send_telem();
-    std::string command(const std::string& line);
     std::string set_param(const param_info& pi, float value, float* applied);
     std::string status_text();
     bool save_params();
@@ -160,6 +152,13 @@ class app
 
     config cfg_;
     i2c_master_bus_handle_t bus_ = nullptr;
+    std::shared_ptr<app_kit::reactor_t> reactor_;
+    app_kit::cancel_fn console_;
+    app_kit::cancel_fn link_poll_;
+    std::atomic<bool> running_ {false};
+    std::atomic<bool> task_running_ {false};
+    std::shared_ptr<app> control_keepalive_;
+    bool configured_ = false;
     mpu6050 imu_;
     magnetometer mag_;
     servo servo_;
@@ -178,64 +177,82 @@ class app
     int64_t console_rc_until_us_ = 0;
     uint16_t console_seq_ = 0;
 
-    // Link thread only.
+    // Reactor thread only (poll_link / command).
     uint16_t telem_seq_ = 0;
+    std::vector<uint8_t> link_buf_;
+    int64_t next_telem_ = 0, next_print_ = 0;
 };
 
-int app::run()
+bool app::configure()
 {
+    stop();
     if (i2c_master_get_bus_handle(static_cast<i2c_port_num_t>(cfg_.pin.i2c_port), &bus_) != ESP_OK)
     {
-        ESP_LOGE(TAG, "no I2C%d bus: create it before rover_sample::main", cfg_.pin.i2c_port);
-        return 1;
+        ESP_LOGE(TAG, "no I2C%d bus: create it before rover_sample configure", cfg_.pin.i2c_port);
+        return false;
     }
-    sockaddr_in addr {};
-    if (!parse_host_port(cfg_.console, &addr))
+    reactor_ = app_kit::find_reactor(cfg_.reactor);
+    if (!reactor_)
     {
-        ESP_LOGE(TAG, "bad console address %s", cfg_.console.c_str());
-        return 1;
+        ESP_LOGE(TAG, "no reactor %s", cfg_.reactor.c_str());
+        return false;
     }
-    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0 || bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0)
-    {
-        ESP_LOGE(TAG, "cannot bind console %s", cfg_.console.c_str());
-        return 1;
-    }
-    timeval timeout {};
-    timeout.tv_usec = 100 * 1000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
     load_params();
+    configured_ = true;
+    return true;
+}
+
+bool app::start()
+{
+    if (!configured_ || running_.exchange(true))
+    {
+        return false;
+    }
 
     /* Internal RAM is short with 1080p live TX running: with rover_sample's
      * stacks internal (20 KB left) live TX fell to ~20 fps, its sender and FEC
      * ~5x slower; on PSRAM stacks it runs at 29 fps as without rover_sample.
-     * So every rover_sample stack is in PSRAM (the caller's too, see main.cpp)
-     * and only NVS access borrows an internal one (on_internal_stack). */
-    esp_pthread_cfg_t prev {};
-    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
-    esp_pthread_cfg_t ccfg = esp_pthread_get_default_config();
-    ccfg.stack_size = 6 * 1024;
-    ccfg.prio = 5;
-    ccfg.thread_name = "rs_console";
-    ccfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    esp_pthread_set_cfg(&ccfg);
-    std::thread(&app::console_loop, this, fd).detach();
-    if (had_prev)
-    {
-        esp_pthread_set_cfg(&prev);
-    }
-
+     * So the control task's stack is in PSRAM (the app reactor's is too, see
+     * app_kit) and only NVS access borrows an internal one
+     * (on_internal_stack). */
+    task_running_.store(true);
+    control_keepalive_ = shared_from_this();
     if (xTaskCreatePinnedToCoreWithCaps(control_trampoline, "rs_control", 6 * 1024, this, cfg_.control_prio,
                                         nullptr, cfg_.control_core, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) !=
         pdPASS)
     {
         ESP_LOGE(TAG, "control task not created");
-        return 1;
+        control_keepalive_.reset();
+        task_running_.store(false);
+        running_.store(false);
+        return false;
     }
-    printf("rover_sample: console %s, RC/telemetry MSP v2 on the link\n", cfg_.console.c_str());
-    link_loop();
-    return 0;
+    auto self = shared_from_this();
+    console_ = app_kit::udp_console(*reactor_, cfg_.console,
+                                    [self](const std::string& line) { return self->command(line); });
+    if (!console_)
+    {
+        stop();
+        return false;
+    }
+    link_poll_ = app_kit::every(*reactor_, cfg_.link_poll_ms, [self] { self->poll_link(); });
+    printf("rover_sample: console %s, RC/telemetry MSP v2 on the link (reactor %s)\n", cfg_.console.c_str(),
+           cfg_.reactor.c_str());
+    return true;
+}
+
+void app::stop()
+{
+    running_.store(false);
+    if (link_poll_) link_poll_();
+    if (console_) console_();
+    link_poll_ = {};
+    console_ = {};
+    for (int i = 0; task_running_.load() && i < 100; ++i)
+    {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
 }
 
 void app::control_task()
@@ -268,7 +285,7 @@ void app::control_task()
     uint32_t n = 0;
     TickType_t wake = xTaskGetTickCount();
 
-    for (;;)
+    for (; running_.load();)
     {
         if (xTaskDelayUntil(&wake, pdMS_TO_TICKS(k_loop_ms)) == pdFALSE)
         {
@@ -494,6 +511,8 @@ void app::control_task()
         st_.loop_max_ms = loop_max_ms;
         st_.mag_cal_running = mag_cal;
     }
+    bts_.deinit();
+    deadman_.set_en_gpio(-1);
 }
 
 void app::send(char dir, uint16_t func, const std::vector<uint8_t>& payload)
@@ -611,64 +630,40 @@ void app::send_telem()
     send(msp::k_from_rover, k_func_telem, pack(t));
 }
 
-void app::link_loop()
+void app::poll_link()
 {
-    std::vector<uint8_t> buf;
-    int64_t next_telem = 0, next_print = 0;
-    for (;;)
+    while (cfg_.link.receive && cfg_.link.receive(&link_buf_))
     {
-        while (cfg_.link.receive && cfg_.link.receive(&buf))
+        msp::frame f;
+        if (msp::decode(link_buf_.data(), link_buf_.size(), &f))
         {
-            msp::frame f;
-            if (msp::decode(buf.data(), buf.size(), &f))
-            {
-                handle_frame(f);
-            }
+            handle_frame(f);
         }
-        const int64_t now = esp_timer_get_time();
-        int telem_hz;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            // Console RC held for a while, re-sent at 50 Hz like a transmitter.
-            if (now < console_rc_until_us_ && now - link_.last_us() >= 20000)
-            {
-                console_rc_.seq = ++console_seq_;
-                console_rc_.t_us = realtime_us32();
-                link_.accept(console_rc_, now, console_rc_.t_us,
-                             static_cast<uint32_t>(p_.get(p_failsafe_ms)));
-            }
-            link_.tick(now);
-            telem_hz = static_cast<int>(p_.get(p_telem_hz));
-        }
-        if (now >= next_telem)
-        {
-            next_telem = now + 1000000 / telem_hz;
-            send_telem();
-        }
-        if (now >= next_print)
-        {
-            next_print = now + 10000000;
-            printf("ROVER_SAMPLE %s\n", status_text().c_str());
-        }
-        vTaskDelay(pdMS_TO_TICKS(2));
     }
-}
-
-void app::console_loop(int fd)
-{
-    char buf[256];
-    for (;;)
+    const int64_t now = esp_timer_get_time();
+    int telem_hz;
     {
-        sockaddr_in from {};
-        socklen_t from_len = sizeof(from);
-        const ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr*>(&from), &from_len);
-        if (n <= 0)
+        std::lock_guard<std::mutex> lock(mu_);
+        // Console RC held for a while, re-sent at 50 Hz like a transmitter.
+        if (now < console_rc_until_us_ && now - link_.last_us() >= 20000)
         {
-            continue;
+            console_rc_.seq = ++console_seq_;
+            console_rc_.t_us = realtime_us32();
+            link_.accept(console_rc_, now, console_rc_.t_us,
+                         static_cast<uint32_t>(p_.get(p_failsafe_ms)));
         }
-        buf[n] = '\0';
-        const std::string reply = command(buf);
-        sendto(fd, reply.data(), reply.size(), 0, reinterpret_cast<const sockaddr*>(&from), from_len);
+        link_.tick(now);
+        telem_hz = static_cast<int>(p_.get(p_telem_hz));
+    }
+    if (now >= next_telem_)
+    {
+        next_telem_ = now + 1000000 / telem_hz;
+        send_telem();
+    }
+    if (now >= next_print_)
+    {
+        next_print_ = now + 10000000;
+        printf("ROVER_SAMPLE %s\n", status_text().c_str());
     }
 }
 
@@ -932,16 +927,34 @@ void app::load_params()
 
 }  // namespace
 
-int main(const config& cfg)
+struct Applet::Impl
 {
-    // Lives for the program; the control task holds a pointer.
-    auto* a = new app(cfg);
-    const int rc = a->run();
-    if (rc != 0)
+    std::shared_ptr<app> instance;
+};
+
+Applet::Applet() : impl_(std::make_unique<Impl>()) {}
+Applet::~Applet() { stop(); }
+
+bool Applet::configure(const config& cfg)
+{
+    stop();
+    impl_->instance = std::make_shared<app>(cfg);
+    if (!impl_->instance->configure())
     {
-        delete a;
+        impl_->instance.reset();
+        return false;
     }
-    return rc;
+    return true;
+}
+
+bool Applet::start()
+{
+    return impl_->instance && impl_->instance->start();
+}
+
+void Applet::stop()
+{
+    if (impl_->instance) impl_->instance->stop();
 }
 
 }  // namespace rover_sample
