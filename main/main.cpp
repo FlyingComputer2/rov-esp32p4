@@ -48,7 +48,8 @@
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include "esp_pthread.h"
-#include "esp_system.h"
+#include "esp_attr.h"
+#include "esp_rom_sys.h"
 #include "hal/wdt_hal.h"
 #include "riscv/rv_utils.h"
 #include "esp_spiffs.h"
@@ -643,14 +644,18 @@ void start_video()
 
 }  // namespace
 
-/* esp_restart() on the P4 resets only the CPU cores and a short list of peripherals
- * (esp_system_reset_modules_on_exit). On this rover (P4 rev v3.1) the next boot then often
- * stalls after "cpu_start: Multicore app" until the bootloader's 9 s RTC watchdog fires; a
- * freshly OTA'd image is still pending at that point, so the bootloader rolls it back. Boots
- * after a full system reset have not stalled. So end every esp_restart() with a full system
- * reset from the RTC watchdog instead of the CPU-only reset. Registered first in app_main:
- * shutdown handlers run in reverse order, so this one runs after all the others. */
-void restart_with_system_reset()
+/* Workaround for an ESP32-P4 boot hang (seen on rev v3.1, IDF v5.5.5): esp_restart_noos() resets
+ * only the CPU cores (RESET_REASON_CPU_SW). After that, the next boot often hangs at its first
+ * L2-cache write-back to PSRAM (in practice inside the PSRAM memtest, right after "cpu_start:
+ * Multicore app") until the bootloader's 9 s RTC watchdog does a system reset. A freshly OTA'd
+ * image is still pending then, so the bootloader rolls it back. Boots after a system reset never
+ * hang. So every software restart (esp_restart(), panics, cpu_start and USB-console restarts,
+ * which all call esp_restart_noos) is turned into an RTC watchdog system reset; main's
+ * CMakeLists links with -Wl,--wrap=esp_restart_noos. Shutdown handlers still run first (inside
+ * esp_restart()). */
+extern "C" void __real_esp_restart_noos(void);
+
+extern "C" void IRAM_ATTR __wrap_esp_restart_noos(void)
 {
     rv_utils_intr_global_disable();
     wdt_hal_context_t rwdt;
@@ -662,15 +667,13 @@ void restart_with_system_reset()
     wdt_hal_set_flashboot_en(&rwdt, true);
     wdt_hal_enable(&rwdt);
     wdt_hal_write_protect_enable(&rwdt);
-    while (true)
-    {
-    }
+    /* The watchdog should fire within milliseconds; if it does not, restart the IDF way. */
+    esp_rom_delay_us(100 * 1000);
+    __real_esp_restart_noos();
 }
 
 extern "C" void app_main(void)
 {
-    ESP_ERROR_CHECK(esp_register_shutdown_handler(restart_with_system_reset));
-
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
