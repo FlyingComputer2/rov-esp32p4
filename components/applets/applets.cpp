@@ -190,7 +190,7 @@ bool BwtestApplet::start()
     }
     /* Lives for the program: the callbacks hold it. app_bwtest takes an
      * UpstreamQueue: built on the named queues (ingress = to L3). */
-    auto up = std::make_shared<winject::UpstreamQueue>(to_l3_, from_l3_);
+    auto up = std::make_shared<winject::core::UpstreamQueue>(to_l3_, from_l3_);
     auto bw = std::make_shared<app_bwtest::Bwtest>(up, cfg_.payload_bytes);
     /* test_send creates its sender from the handler: set its thread settings
      * there (the reactor's do not pass on). */

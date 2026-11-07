@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,6 +37,7 @@
 #include <bfc/shared_sized_buffer.hpp>
 
 #include "WinjectL3.h"
+#include "winject_l3/Console.h"
 #include "synch/SynchGpio.h"
 #include "core/thread_spawn.hpp"
 #include "driver/gpio.h"
@@ -430,7 +432,63 @@ void* run_l3(void*)
         fflush(stdout);
         return nullptr;
     }
-    const int rc = winject_l3::main(cfg);
+    // l3's UDP console: a reactor of its own, named for console::Service.
+    auto console_reactor = std::make_shared<winject::l3::console::Reactor>();
+    winject::l3::console::ReactorRegistry::get_instance().add("l3-console",
+                                                             console_reactor);
+    {
+        esp_pthread_cfg_t c = esp_pthread_get_default_config();
+        c.stack_size = 6 * 1024;
+        c.thread_name = "l3_console";
+        esp_pthread_set_cfg(&c);
+    }
+    // A stop() before run() set the reactor running would be lost, and the
+    // join below would never return: wait until it runs.
+    std::promise<void> console_running;
+    auto console_is_running = console_running.get_future();
+    console_reactor->wake_up(
+        [&console_running]()
+        {
+            console_running.set_value();
+        });
+    std::thread console_thread(
+        [console_reactor]()
+        {
+            console_reactor->run();
+        });
+    console_is_running.wait();
+    winject::l3::console::Service console;
+    auto started = [&](const winject::L3& l3)
+    {
+        if (!cfg.console_in.empty())
+        {
+            const winject::Status s =
+                console.start(l3, cfg.console_in, "l3-console");
+            if (!s.ok())
+            {
+                printf("L3_CONSOLE_FAILED %s\n", s.error.c_str());
+            }
+        }
+    };
+    const int rc = winject::L3::run(
+        cfg, started,
+        [](winject::L3::Thread t)
+        {
+            esp_pthread_cfg_t c = esp_pthread_get_default_config();
+            if (t == winject::L3::Thread::l3)
+            {
+                c.stack_size = k_l3_stack_bytes;
+                c.thread_name = "l3_reactor";
+            }
+            else
+            {
+                c.thread_name = "l3_upstream";
+            }
+            esp_pthread_set_cfg(&c);
+        });
+    console.stop();
+    console_reactor->stop();
+    console_thread.join();
     printf("ROVER_L3_EXIT rc=%d\n", rc);
     fflush(stdout);
     return nullptr;
