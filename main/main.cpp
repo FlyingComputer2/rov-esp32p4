@@ -48,6 +48,9 @@
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include "esp_pthread.h"
+#include "esp_system.h"
+#include "hal/wdt_hal.h"
+#include "riscv/rv_utils.h"
 #include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "applets.hpp"
@@ -640,8 +643,34 @@ void start_video()
 
 }  // namespace
 
+/* esp_restart() on the P4 resets only the CPU cores and a short list of peripherals
+ * (esp_system_reset_modules_on_exit). On this rover (P4 rev v3.1) the next boot then often
+ * stalls after "cpu_start: Multicore app" until the bootloader's 9 s RTC watchdog fires; a
+ * freshly OTA'd image is still pending at that point, so the bootloader rolls it back. Boots
+ * after a full system reset have not stalled. So end every esp_restart() with a full system
+ * reset from the RTC watchdog instead of the CPU-only reset. Registered first in app_main:
+ * shutdown handlers run in reverse order, so this one runs after all the others. */
+void restart_with_system_reset()
+{
+    rv_utils_intr_global_disable();
+    wdt_hal_context_t rwdt;
+    wdt_hal_init(&rwdt, WDT_RWDT, 0, false);
+    wdt_hal_write_protect_disable(&rwdt);
+    /* A few slow-clock ticks: well under 10 ms. */
+    wdt_hal_config_stage(&rwdt, WDT_STAGE0, 100, WDT_STAGE_ACTION_RESET_SYSTEM);
+    wdt_hal_config_stage(&rwdt, WDT_STAGE1, 100, WDT_STAGE_ACTION_RESET_RTC);
+    wdt_hal_set_flashboot_en(&rwdt, true);
+    wdt_hal_enable(&rwdt);
+    wdt_hal_write_protect_enable(&rwdt);
+    while (true)
+    {
+    }
+}
+
 extern "C" void app_main(void)
 {
+    ESP_ERROR_CHECK(esp_register_shutdown_handler(restart_with_system_reset));
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
