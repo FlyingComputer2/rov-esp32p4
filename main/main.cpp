@@ -441,9 +441,10 @@ void* run_l3(void*)
     winject::l3::console::ReactorRegistry::get_instance().add("l3-console",
                                                              console_reactor);
     {
-        esp_pthread_cfg_t c = esp_pthread_get_default_config();
-        c.stack_size = 6 * 1024;
-        c.thread_name = "l3_console";
+        /* Stacks in PSRAM, like every other thread of the l3 stack (internal RAM
+         * is what live TX runs short of); the console is not time-critical. */
+        const esp_pthread_cfg_t c =
+            psram_thread_cfg("l3_console", k_l3_child_stack_bytes, k_l3_child_prio);
         esp_pthread_set_cfg(&c);
     }
     // A stop() before run() set the reactor running would be lost, and the
@@ -478,15 +479,19 @@ void* run_l3(void*)
         cfg, started,
         [](winject::L3::Thread t)
         {
-            esp_pthread_cfg_t c = esp_pthread_get_default_config();
+            /* Same policy as before the public API: PSRAM stacks, upstream
+             * threads at k_l3_child_prio. The reactor thread keeps the default
+             * priority and must stay pinned to core 1 (see start_l3): unpinned
+             * it lands on core 0 at its first FPU use, where vs_isp_tx runs. */
+            esp_pthread_cfg_t c =
+                t == winject::L3::Thread::l3
+                    ? psram_thread_cfg("l3_reactor", k_l3_stack_bytes,
+                                       esp_pthread_get_default_config().prio)
+                    : psram_thread_cfg("l3_upstream", k_l3_child_stack_bytes,
+                                       k_l3_child_prio);
             if (t == winject::L3::Thread::l3)
             {
-                c.stack_size = k_l3_stack_bytes;
-                c.thread_name = "l3_reactor";
-            }
-            else
-            {
-                c.thread_name = "l3_upstream";
+                c.pin_to_core = k_l3_cpu;
             }
             esp_pthread_set_cfg(&c);
         });
