@@ -17,6 +17,6 @@ idf_component_register(
     PRIV_REQUIRES lwip log
 )
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
-    target_include_directories(${COMPONENT_LIB} PUBLIC ${bfc_SOURCE_DIR}/src)
+    target_include_directories(${COMPONENT_LIB} PUBLIC ${bfc_SOURCE_DIR}/src ${BFC_CONFIG_DIR})
 endif()
 target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17 -fexceptions>)

@@ -316,11 +316,13 @@ void on_ota_active(bool active, void*)
     }
 }
 
-/* The app reactor, a bfc::default_reactor<> registered as "apps" in
- * bfc::default_reactor_registry: the applets attach to it by name. Socket and
- * queue callbacks only (no flash), so a PSRAM stack; priority 10, as
- * rover_sample's RC link loop had (failsafe). Threads its callbacks create
- * set their own settings. */
+/* The firmware's IO reactor, a bfc::default_reactor<> registered as "apps" in
+ * bfc::default_reactor_registry: the applets attach to it by name, and
+ * winject-l3 runs its reactor (radio m-plane, TX timers, UDP upstreams) and its
+ * UDP console on it (L3::Reactors). Socket, queue and timer callbacks only (no
+ * flash), so a PSRAM stack, 16 KB as l3's own reactor thread had; priority 12,
+ * as l3's console and upstream threads had. Threads its callbacks create set
+ * their own settings. */
 constexpr const char* k_apps_reactor = "apps";
 std::shared_ptr<bfc::default_reactor<>> g_apps;
 
@@ -341,7 +343,7 @@ void create_apps_reactor()
  * (as winject-l3's thread, see start_l3). */
 void run_apps_reactor()
 {
-    esp_pthread_cfg_t cfg = psram_thread_cfg("apps", 6 * 1024, 10);
+    esp_pthread_cfg_t cfg = psram_thread_cfg("apps", k_l3_stack_bytes, k_l3_child_prio);
     cfg.pin_to_core = 1;
     const scoped_pthread_cfg scope(cfg);
     std::thread([r = g_apps] { r->run(); }).detach();
@@ -436,68 +438,26 @@ void* run_l3(void*)
         fflush(stdout);
         return nullptr;
     }
-    // l3's UDP console: a reactor of its own, named for console::Service.
-    auto console_reactor = std::make_shared<winject::l3::console::Reactor>();
-    winject::l3::console::ReactorRegistry::get_instance().add("l3-console",
-                                                             console_reactor);
-    {
-        /* Stacks in PSRAM, like every other thread of the l3 stack (internal RAM
-         * is what live TX runs short of); the console is not time-critical. */
-        const esp_pthread_cfg_t c =
-            psram_thread_cfg("l3_console", k_l3_child_stack_bytes, k_l3_child_prio);
-        esp_pthread_set_cfg(&c);
-    }
-    // A stop() before run() set the reactor running would be lost, and the
-    // join below would never return: wait until it runs.
-    std::promise<void> console_running;
-    auto console_is_running = console_running.get_future();
-    console_reactor->wake_up(
-        [&console_running]()
-        {
-            console_running.set_value();
-        });
-    std::thread console_thread(
-        [console_reactor]()
-        {
-            console_reactor->run();
-        });
-    console_is_running.wait();
+    // l3's UDP console, on the app reactor like l3 itself.
     winject::l3::console::Service console;
     auto started = [&](const winject::L3& l3)
     {
         if (!cfg.console_in.empty())
         {
             const winject::Status s =
-                console.start(l3, cfg.console_in, "l3-console");
+                console.start(l3, cfg.console_in, k_apps_reactor);
             if (!s.ok())
             {
                 printf("L3_CONSOLE_FAILED %s\n", s.error.c_str());
             }
         }
     };
-    const int rc = winject::L3::run(
-        cfg, started,
-        [](winject::L3::Thread t)
-        {
-            /* Same policy as before the public API: PSRAM stacks, upstream
-             * threads at k_l3_child_prio. The reactor thread keeps the default
-             * priority and must stay pinned to core 1 (see start_l3): unpinned
-             * it lands on core 0 at its first FPU use, where vs_isp_tx runs. */
-            esp_pthread_cfg_t c =
-                t == winject::L3::Thread::l3
-                    ? psram_thread_cfg("l3_reactor", k_l3_stack_bytes,
-                                       esp_pthread_get_default_config().prio)
-                    : psram_thread_cfg("l3_upstream", k_l3_child_stack_bytes,
-                                       k_l3_child_prio);
-            if (t == winject::L3::Thread::l3)
-            {
-                c.pin_to_core = k_l3_cpu;
-            }
-            esp_pthread_set_cfg(&c);
-        });
+    /* No threads of l3's own: its reactor runs on the app reactor (core 1, see
+     * run_apps_reactor) and its upstream data path on the d-plane reactor
+     * (rover_dp, core 1), next to the queues it serves. */
+    const int rc = winject::L3::run(cfg, started, {},
+                                    winject::L3::Reactors {k_apps_reactor, k_dp_reactor});
     console.stop();
-    console_reactor->stop();
-    console_thread.join();
     printf("ROVER_L3_EXIT rc=%d\n", rc);
     fflush(stdout);
     return nullptr;
@@ -563,6 +523,8 @@ vstreamer::idf::live_tx_config video_config()
     cfg.queue_rx = k_video_rx;
     cfg.queue_reactor = k_dp_reactor;
     cfg.mplane_port = k_video_mplane_port;
+    /* On the app reactor (core 1), not a vs_mplane thread of its own. */
+    cfg.mplane_reactor = k_apps_reactor;
     cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
     /* In order: fec_k before fec_n, since k may not exceed the current n (sender starts at
