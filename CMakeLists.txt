@@ -10,13 +10,15 @@ if(NOT DEFINED PROJECT_VER)
 endif()
 
 include(FetchContent)
-# The three share bfc's queue and reactor registries, so they must build
-# against one bfc: FetchContent keeps the first declaration, and this one
-# comes before theirs. It is ahead of their pins (f6fe978): bfc master, for the fd
-# reactors' queue support the applets use; bump theirs to match.
+# One bfc for the whole firmware: the dependencies share its queue and reactor
+# registries. BFC_PIN is checked against each dependency's own pin
+# (BfcFetch.cmake), and BFC_CONFIG_DIR holds this firmware's bfc_config.hpp
+# (function type, allocator, poll reactor), which every bfc user compiles with.
+set(BFC_PIN 3d68f8e61ef933718a51f248c76be8894d0cb491)
+set(BFC_CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/bfc_config)
 FetchContent_Declare(bfc
     GIT_REPOSITORY https://github.com/therooftopprinz/BFC.git
-    GIT_TAG 1f732b19927dbe2c7092b2c93181ff21042d0781
+    GIT_TAG ${BFC_PIN}
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
