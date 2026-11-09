@@ -523,6 +523,8 @@ vstreamer::idf::live_tx_config video_config()
     cfg.queue_rx = k_video_rx;
     cfg.queue_reactor = k_dp_reactor;
     cfg.mplane_port = k_video_mplane_port;
+    /* On the app reactor (core 1), not a vs_mplane thread of its own. */
+    cfg.mplane_reactor = k_apps_reactor;
     cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
     /* In order: fec_k before fec_n, since k may not exceed the current n (sender starts at
