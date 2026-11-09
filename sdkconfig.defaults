@@ -42,4 +42,5 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # lwIP pbufs in PSRAM: at video rate in internal RAM an IDR burst took
 # internal free down to ~300 B, which winject-l3 and the proxy cannot afford.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
+# Prefer PSRAM for ordinary malloc; explicit internal and DMA requests keep their caps.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
