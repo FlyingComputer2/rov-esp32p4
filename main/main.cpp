@@ -13,9 +13,10 @@
 // bandwidth tester (app_bwtest, UDP console 5100) and 3 rover_sample (RC car:
 // RC in, telemetry out, MSP v2; UDP console 5120). Upstreams 7 and 8 are the
 // tester's and the clock-sync client's m-planes, served directly on their
-// queues (request in, reply out; no socket). All five are on named queues
+// queues (request in, reply out; no socket). The applets' queues are named,
 // registered here (L3's side on rover_dp) and run as applets on one shared
-// reactor, "apps" (see start_applets). The radio m-plane
+// reactor, "apps" (see start_applets). Upstream 10 is the system applet's
+// m-plane (get sys cpu / heap / stack / ...; UDP console 5130). The radio m-plane
 // stays on UDP loopback. App and C6 updates go over the SDIO proxy's udp_ota
 // (UDP 3232), on Ethernet or over the air through upstream 9 (a static UDP
 // upstream to 127.0.0.1:3232).
@@ -59,6 +60,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "rover_sample/rover_sample.hpp"
+#include "sys_applet/applet.hpp"
 #include "vstreamer_idf/live_tx.hpp"
 #include "winject_proxy.h"
 
@@ -163,6 +165,7 @@ constexpr int k_video_mplane_port = 5090;
  *   3 rover_sample RC / telemetry      rc_tx / rc_rx
  *   7 tester m-plane                   bwtest_mp_tx / bwtest_mp_rx
  *   8 clock-sync m-plane               synch_mp_tx / synch_mp_rx
+ *  10 system m-plane (sys_applet)      sys_mp_tx / sys_mp_rx
  * 7 and 8 serve the same commands as the UDP consoles; the ground is a
  * udp_server on 5102 / 5112 (replies to the last sender, one operator at a
  * time). */
@@ -176,6 +179,7 @@ const app_upstream k_bwtest_up {{"bwtest_tx", "bwtest_rx"}, 256};
 const app_upstream k_rc_up {{"rc_tx", "rc_rx"}, 16};
 const app_upstream k_bwtest_mplane_up {{"bwtest_mp_tx", "bwtest_mp_rx"}, 16};
 const app_upstream k_synch_mplane_up {{"synch_mp_tx", "synch_mp_rx"}, 16};
+const app_upstream k_sys_mplane_up {{"sys_mp_tx", "sys_mp_rx"}, 16};
 
 constexpr const char* k_bwtest_console = "0.0.0.0:5100";
 
@@ -184,6 +188,10 @@ constexpr const char* k_bwtest_console = "0.0.0.0:5100";
  * open drain, active low, to the ground's GPIO20 (JP1 pin 17). */
 constexpr const char* k_synch_console = "0.0.0.0:5110";
 constexpr int k_synch_pulse_gpio = 20;
+
+/* The system applet (get sys cpu / heap / stack / uptime / reset / version): UDP console
+ * 5130; its m-plane is upstream 10 (over the air: ground UDP 5132). */
+constexpr const char* k_sys_console = "0.0.0.0:5130";
 
 /* rover_sample: its sensors share the board I2C with the camera SCCB and the
  * codec: GPIO7 SDA / GPIO8 SCL (header pins 3 / 5, ESP_I2C_SDA / _SCL), board
@@ -232,7 +240,7 @@ bool start_dplane_queues()
         !register_queue(k_video_rx, k_video_rx_capacity) ||
         !register_app_upstream(k_synch_up) || !register_app_upstream(k_bwtest_up) ||
         !register_app_upstream(k_rc_up) || !register_app_upstream(k_bwtest_mplane_up) ||
-        !register_app_upstream(k_synch_mplane_up))
+        !register_app_upstream(k_synch_mplane_up) || !register_app_upstream(k_sys_mplane_up))
     {
         return false;
     }
@@ -381,6 +389,19 @@ void start_applets()
     if (!synch.configure(sc) || !synch.start())
     {
         printf("ROVER_SYNCH_EXIT rc=1\n");
+    }
+
+    /* The system queries (sys-applet-esp32p4): console 5130 and m-plane
+     * upstream 10. The applet pushes replies into the upstream's rx queue. */
+    static sys_applet::Applet sys;
+    sys_applet::config sy;
+    sy.reactor = k_apps_reactor;
+    sy.console = k_sys_console;
+    sy.mplane_out = k_sys_mplane_up.names.to_l3;
+    sy.mplane_in = k_sys_mplane_up.names.from_l3;
+    if (!sys.configure(sy) || !sys.start())
+    {
+        printf("ROVER_SYS_EXIT rc=1\n");
     }
 
     /* Its 250 Hz control task (core 1, priority 16, one 14-byte I2C read per

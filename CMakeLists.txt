@@ -3,7 +3,8 @@
 # joined by in-process bfc queues (main/main.cpp).
 # Local checkouts: -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=<dir>,
 # -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY=<dir>,
-# -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=<dir>, -DFETCHCONTENT_SOURCE_DIR_KRONO=<dir>.
+# -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=<dir>, -DFETCHCONTENT_SOURCE_DIR_KRONO=<dir>,
+# -DFETCHCONTENT_SOURCE_DIR_SYS_APPLET=<dir>.
 cmake_minimum_required(VERSION 3.16)
 if(NOT DEFINED PROJECT_VER)
     set(PROJECT_VER "0.1.0")
@@ -32,14 +33,20 @@ FetchContent_Declare(winject_sdio_proxy
 # is declared first wins, so keep their pins equal.
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 0253187fdaee9e5e5ab7a47a40b0f13aedf0bcb2
+    GIT_TAG fd6e23529ada1154d180507a6efb2c8ffa7e5808
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono
     GIT_REPOSITORY https://github.com/FlyingComputer2/krono.git
     GIT_TAG c7dc5caaca89d93467ddb2dfb349a8f7ef30f005
 )
-foreach(dep winject_l3 winject_sdio_proxy vstreamer krono)
+# The system applet (get sys cpu / heap / stack / ...; console 5130, m-plane
+# upstream 10). It uses this firmware's bfc and pins none.
+FetchContent_Declare(sys_applet
+    GIT_REPOSITORY https://github.com/FlyingComputer2/sys-applet-esp32p4.git
+    GIT_TAG e5ec5087e856d69979ec42e52c65bd820bd670fe
+)
+foreach(dep winject_l3 winject_sdio_proxy vstreamer krono sys_applet)
     FetchContent_GetProperties(${dep})
     if(NOT ${dep}_POPULATED)
         FetchContent_Populate(${dep})
@@ -51,6 +58,7 @@ set(EXTRA_COMPONENT_DIRS
     ${winject_l3_SOURCE_DIR}/idf/winject_l3
     ${winject_l3_SOURCE_DIR}/idf/app_bwtest
     ${krono_SOURCE_DIR}/idf/krono
+    ${sys_applet_SOURCE_DIR}/idf/sys_applet
     ${vstreamer_SOURCE_DIR}/idf/vstreamer
     ${WINJECT_SDIO_PROXY_COMPONENT_DIRS})
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
