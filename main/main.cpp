@@ -392,13 +392,13 @@ void start_applets()
     }
 
     /* The system queries (sys-applet-esp32p4): console 5130 and m-plane
-     * upstream 10. The applet pushes replies into the upstream's rx queue. */
+     * upstream 10, both on the app reactor; no task of its own. */
     static sys_applet::Applet sys;
     sys_applet::config sy;
+    sy.mplane_to_l3 = k_sys_mplane_up.names.to_l3;
+    sy.mplane_from_l3 = k_sys_mplane_up.names.from_l3;
     sy.reactor = k_apps_reactor;
     sy.console = k_sys_console;
-    sy.mplane_out = k_sys_mplane_up.names.to_l3;
-    sy.mplane_in = k_sys_mplane_up.names.from_l3;
     if (!sys.configure(sy) || !sys.start())
     {
         printf("ROVER_SYS_EXIT rc=1\n");
