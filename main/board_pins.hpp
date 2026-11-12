@@ -23,6 +23,9 @@ constexpr gpio_num_t k_bts_en = GPIO_NUM_6;     // header pin 15 (10k pulldown)
 constexpr gpio_num_t k_bts_r_is = GPIO_NUM_21;  // header pin 11, ADC1
 constexpr gpio_num_t k_bts_l_is = GPIO_NUM_23;  // header pin 7, ADC1
 
+// --- VBUS / battery divider (ADC1, high side of divider to VBUS, low to ADC) ---
+constexpr gpio_num_t k_vbus_sense = GPIO_NUM_9;  // header pin 8, ADC1
+
 /** Actuator pins passed into rover_sample (I2C port filled by main). */
 inline rover_sample::pins actuator_pins()
 {
@@ -33,6 +36,7 @@ inline rover_sample::pins actuator_pins()
     p.bts_en = static_cast<int>(k_bts_en);
     p.bts_r_is = static_cast<int>(k_bts_r_is);
     p.bts_l_is = static_cast<int>(k_bts_l_is);
+    p.vbus_adc = static_cast<int>(k_vbus_sense);
     return p;
 }
 

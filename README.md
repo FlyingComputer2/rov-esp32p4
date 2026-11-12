@@ -180,6 +180,7 @@ Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
 | BTS7960 RPWM / LPWM | 4 / 5 | 18 / 16 | 20 kHz |
 | BTS7960 R_EN + L_EN | 6 | 15 | Tied together; 10 k pull-down to GND so a P4 reset coasts |
 | BTS7960 R_IS / L_IS | 21 / 23 | 11 / 7 | ADC1, through a divider (IS reaches ~5 V); ratio in `is_div` |
+| VBUS sense | 9 | 8 | ADC1 divider to pack/BEC; ratio in `vbus_div` (default 12) |
 | 3V3 / 5V / GND | | 1, 17 / 2, 4 / 6, 9, 14, 20, 25, 30, 34, 39 | |
 
 `main/main.cpp` creates the board I2C bus before video starts; the camera source uses that bus rather than creating its own. The BTS7960 stays unconfigured (pins untouched) until `set bts_enabled 1`. Mount the GY-521 flat with its x arrow forward and the GY-271 in the same orientation: the body frame is x forward, y left, z up, and a right turn is a positive yaw rate (`imu_yaw_sign` flips it).
@@ -229,7 +230,7 @@ Parameters (`list` prints them; defaults are placeholders until the car is measu
 | Servo | `servo_min_us` 1100, `servo_center_us` 1500, `servo_max_us` 1900, `servo_reverse` 0, `servo_hz` 50 (disarmed only) |
 | Geometry | `steer_max_deg` 30 (wheel angle at full throw), `wheelbase_m` 0.26 |
 | Steering | `mode` 1, `rate_max_dps` 360, `a_lat_max` 8, `expo` 0.3, `kp` 0.004, `ki` 0.02, `kff` 1, `blend_v0` 0.5, `blend_v1` 1.5, `hold_kp` 2, `gyro_lpf_hz` 42, `imu_yaw_sign` -1 |
-| Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000 |
+| Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000, `vbus_div` 12 |
 | Link | `failsafe_ms` 300, `telem_hz` 20 |
 | Compass | `mag_off_x` / `_y` / `_z` (from `mag_cal`) |
 

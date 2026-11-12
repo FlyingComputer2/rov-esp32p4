@@ -77,12 +77,36 @@ class servo
     bool ok_ = false;
 };
 
+// VBUS divider on ADC1 (owned ADC unit; BTS IS channels may share it).
+class vbus_sense
+{
+   public:
+    bool init(int gpio);
+    float read_v(float divider) const;
+    adc_oneshot_unit_handle_t unit() const
+    {
+        return adc_;
+    }
+    adc_cali_handle_t cali() const
+    {
+        return cali_;
+    }
+
+   private:
+    adc_oneshot_unit_handle_t adc_ = nullptr;
+    adc_cali_handle_t cali_ = nullptr;
+    adc_channel_t ch_ = ADC_CHANNEL_0;
+    bool ok_ = false;
+};
+
 // BTS7960 (IBT-2): RPWM / LPWM / EN on LEDC timer 3 / channels 5-7, R_IS /
 // L_IS on ADC1. EN is the deadman's cut-off.
 class bts7960
 {
    public:
-    bool init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz);
+    bool init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz,
+              adc_oneshot_unit_handle_t shared_adc = nullptr,
+              adc_cali_handle_t shared_cali = nullptr);
     void deinit();
     bool enabled() const
     {
@@ -108,6 +132,7 @@ class bts7960
     adc_cali_handle_t cali_ = nullptr;
     int ch_r_ = -1, ch_l_ = -1;
     float overload_t_ = 0;
+    bool owns_adc_ = true;
 };
 
 // One-shot GPTimer; kick() every control cycle. If 50 ms pass without one,

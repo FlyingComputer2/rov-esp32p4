@@ -21,6 +21,14 @@ avoid when adding hardware.
 | BTS R_IS | **21** | **11** | ADC1 | Current sense via divider (`is_div`, `is_r_ohm`) |
 | BTS L_IS | **23** | **7** | ADC1 | Same |
 
+## VBUS voltage (divider → ADC)
+
+| Signal | ESP32-P4 GPIO | 40-pin header | Driver | Notes |
+|--------|---------------|---------------|--------|-------|
+| VBUS sense | **9** | **8** | ADC1 (`vbus_sense`) | High side of divider to **VBUS+** (pack / BEC), low side to GPIO **9**. Scale with `vbus_div` (default **12**: e.g. 110 kΩ top, 10 kΩ bottom for a 12 V bus). Use **≥100 kΩ** total divider current for a 2S–4S pack. Shares the ADC1 unit with BTS **R_IS/L_IS** when `bts_enabled` is on |
+
+Firmware reads VBUS every control cycle and prints `vbus_v` on the periodic `ROVER_SAMPLE` status line and in `status` on UDP 5120. Calibrate `vbus_div` against a meter (`set vbus_div <ratio>` then `save`).
+
 LED assignments are fixed in
 [`components/rover_sample/src/drivers.cpp`](../components/rover_sample/src/drivers.cpp)
 (timer 2 = servo, timer 3 = BTS; LEDC channels 4–7). Timers 0–1 and channels

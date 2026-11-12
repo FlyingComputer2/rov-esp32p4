@@ -43,12 +43,13 @@ enum param_id : uint8_t
     p_tau_v_s = 30,
     p_is_div = 31,
     p_is_r_ohm = 32,
+    p_vbus_div = 33,
     p_failsafe_ms = 40,
     p_telem_hz = 41,
     p_mag_off_x = 50,
     p_mag_off_y = 51,
     p_mag_off_z = 52,
-    p_id_end = 53,
+    p_id_end = 54,
 };
 
 enum : uint8_t

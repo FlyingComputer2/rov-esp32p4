@@ -269,7 +269,73 @@ void servo::set_us(float us)
     ledc_update_duty(k_mode, k_servo_ch);
 }
 
-bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz)
+static float adc_volts(adc_oneshot_unit_handle_t adc, adc_cali_handle_t cali, adc_channel_t ch)
+{
+    int raw = 0;
+    if (!adc || adc_oneshot_read(adc, ch, &raw) != ESP_OK)
+    {
+        return 0.f;
+    }
+    int mv = 0;
+    if (cali && adc_cali_raw_to_voltage(cali, raw, &mv) == ESP_OK)
+    {
+        return mv / 1000.f;
+    }
+    return raw * 3.3f / 4095.f;
+}
+
+bool vbus_sense::init(int gpio)
+{
+    ok_ = false;
+    if (gpio < 0)
+    {
+        return false;
+    }
+    adc_unit_t unit;
+    if (adc_oneshot_io_to_channel(gpio, &unit, &ch_) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "VBUS GPIO%d is not ADC1", gpio);
+        return false;
+    }
+    adc_oneshot_unit_init_cfg_t ucfg = {};
+    ucfg.unit_id = unit;
+    if (adc_oneshot_new_unit(&ucfg, &adc_) != ESP_OK)
+    {
+        return false;
+    }
+    adc_oneshot_chan_cfg_t ccfg = {};
+    ccfg.atten = ADC_ATTEN_DB_12;
+    ccfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(adc_, ch_, &ccfg) != ESP_OK)
+    {
+        adc_oneshot_del_unit(adc_);
+        adc_ = nullptr;
+        return false;
+    }
+    adc_cali_curve_fitting_config_t cal = {};
+    cal.unit_id = unit;
+    cal.atten = ADC_ATTEN_DB_12;
+    cal.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_cali_create_scheme_curve_fitting(&cal, &cali_) != ESP_OK)
+    {
+        cali_ = nullptr;
+    }
+    ok_ = true;
+    ESP_LOGI(TAG, "VBUS sense on GPIO%d (divider via vbus_div param)", gpio);
+    return true;
+}
+
+float vbus_sense::read_v(float divider) const
+{
+    if (!ok_ || divider <= 0.f)
+    {
+        return 0.f;
+    }
+    return adc_volts(adc_, cali_, ch_) * divider;
+}
+
+bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz,
+                     adc_oneshot_unit_handle_t shared_adc, adc_cali_handle_t shared_cali)
 {
     pins_[k_r] = rpwm;
     pins_[k_l] = lpwm;
@@ -288,12 +354,33 @@ bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz)
 
     adc_unit_t unit_r, unit_l;
     adc_channel_t ch_r, ch_l;
+    owns_adc_ = true;
+    if (shared_adc)
+    {
+        adc_ = shared_adc;
+        cali_ = shared_cali;
+        owns_adc_ = false;
+    }
     if (adc_oneshot_io_to_channel(r_is, &unit_r, &ch_r) == ESP_OK &&
         adc_oneshot_io_to_channel(l_is, &unit_l, &ch_l) == ESP_OK && unit_r == unit_l)
     {
-        adc_oneshot_unit_init_cfg_t ucfg = {};
-        ucfg.unit_id = unit_r;
-        if (adc_oneshot_new_unit(&ucfg, &adc_) == ESP_OK)
+        if (!adc_)
+        {
+            adc_oneshot_unit_init_cfg_t ucfg = {};
+            ucfg.unit_id = unit_r;
+            if (adc_oneshot_new_unit(&ucfg, &adc_) == ESP_OK)
+            {
+                adc_cali_curve_fitting_config_t cal = {};
+                cal.unit_id = unit_r;
+                cal.atten = ADC_ATTEN_DB_12;
+                cal.bitwidth = ADC_BITWIDTH_DEFAULT;
+                if (adc_cali_create_scheme_curve_fitting(&cal, &cali_) != ESP_OK)
+                {
+                    cali_ = nullptr;
+                }
+            }
+        }
+        if (adc_)
         {
             adc_oneshot_chan_cfg_t ccfg = {};
             ccfg.atten = ADC_ATTEN_DB_12;
@@ -302,14 +389,6 @@ bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz)
             adc_oneshot_config_channel(adc_, ch_l, &ccfg);
             ch_r_ = ch_r;
             ch_l_ = ch_l;
-            adc_cali_curve_fitting_config_t cal = {};
-            cal.unit_id = unit_r;
-            cal.atten = ADC_ATTEN_DB_12;
-            cal.bitwidth = ADC_BITWIDTH_DEFAULT;
-            if (adc_cali_create_scheme_curve_fitting(&cal, &cali_) != ESP_OK)
-            {
-                cali_ = nullptr;
-            }
         }
     }
     if (!adc_)
@@ -330,16 +409,18 @@ void bts7960::deinit()
             ledc_stop(k_mode, k_bts_ch[i], 0);
         }
     }
-    if (cali_)
+    if (cali_ && owns_adc_)
     {
         adc_cali_delete_scheme_curve_fitting(cali_);
         cali_ = nullptr;
     }
-    if (adc_)
+    if (owns_adc_ && adc_)
     {
         adc_oneshot_del_unit(adc_);
-        adc_ = nullptr;
     }
+    adc_ = nullptr;
+    cali_ = nullptr;
+    owns_adc_ = true;
     ok_ = false;
 }
 
@@ -385,22 +466,11 @@ float bts7960::read_current(float is_div, float r_is_ohm, float dt)
     {
         return 0;
     }
-    auto volts = [&](int ch)
-    {
-        int raw = 0;
-        if (adc_oneshot_read(adc_, static_cast<adc_channel_t>(ch), &raw) != ESP_OK)
-        {
-            return 0.f;
-        }
-        int mv = 0;
-        if (cali_ && adc_cali_raw_to_voltage(cali_, raw, &mv) == ESP_OK)
-        {
-            return mv / 1000.f;
-        }
-        return raw * 3.3f / 4095.f;
-    };
     // Only the conducting half-bridge sources IS current.
-    const float v_is = std::fmax(volts(ch_r_), volts(ch_l_)) * is_div;
+    const float v_is =
+        std::fmax(adc_volts(adc_, cali_, static_cast<adc_channel_t>(ch_r_)),
+                  adc_volts(adc_, cali_, static_cast<adc_channel_t>(ch_l_))) *
+        is_div;
     // Above ~4 V at the IS pin the BTS is at its current limit or in fault
     // (I_IS(lim) ~4.5 mA into 1 k).
     overload_t_ = v_is > 4.0f ? overload_t_ + dt : 0.f;

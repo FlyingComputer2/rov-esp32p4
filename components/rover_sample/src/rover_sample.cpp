@@ -116,6 +116,7 @@ struct status
     float a[3] {};
     float roll = 0, pitch = 0, heading = 0;
     float current = 0;
+    float vbus_v = 0;
     bool imu_present = false, imu_ok = false, mag_present = false, mag_ok = false;
     bool gyro_cal = false, bts_on = false, deadman = false, bts_fault = false;
     const char* mag_kind = "none";
@@ -165,6 +166,7 @@ class app
     magnetometer mag_;
     servo servo_;
     bts7960 bts_;
+    vbus_sense vbus_;
     deadman deadman_;
 
     // Guarded by mu_.
@@ -270,6 +272,10 @@ void app::control_task()
     printf("rover_sample: imu %s, mag %s\n", imu_.present() ? "mpu6050" : "none", mag_.kind());
     servo_.init(cfg_.pin.servo, static_cast<int>(p.get(p_servo_hz)));
     servo_.set_us(p.get(p_servo_center_us));
+    if (cfg_.pin.vbus_adc >= 0)
+    {
+        vbus_.init(cfg_.pin.vbus_adc);
+    }
     int applied_servo_hz = static_cast<int>(p.get(p_servo_hz));
     int applied_lpf = static_cast<int>(p.get(p_gyro_lpf_hz));
     bool bts_on = false;
@@ -354,8 +360,9 @@ void app::control_task()
         if (want_bts != bts_on || (bts_on && want_bts_hz != applied_bts_hz))
         {
             bts_.deinit();
-            bts_on = want_bts && bts_.init(cfg_.pin.bts_rpwm, cfg_.pin.bts_lpwm, cfg_.pin.bts_en,
-                                           cfg_.pin.bts_r_is, cfg_.pin.bts_l_is, want_bts_hz);
+            bts_on = want_bts &&
+                     bts_.init(cfg_.pin.bts_rpwm, cfg_.pin.bts_lpwm, cfg_.pin.bts_en, cfg_.pin.bts_r_is,
+                               cfg_.pin.bts_l_is, want_bts_hz, vbus_.unit(), vbus_.cali());
             applied_bts_hz = want_bts_hz;
             deadman_.set_en_gpio(bts_on ? cfg_.pin.bts_en : -1);
             printf("rover_sample: BTS7960 %s\n", bts_on ? "on" : "off");
@@ -446,6 +453,7 @@ void app::control_task()
         {
             current = bts_.read_current(p.get(p_is_div), p.get(p_is_r_ohm), dt);
         }
+        const float vbus_v = vbus_.read_v(p.get(p_vbus_div));
 
         in.imu_ok = imu_ok;
         in.gyro_cal = cal.done();
@@ -499,6 +507,7 @@ void app::control_task()
         st_.pitch = att.pitch_deg();
         st_.heading = att.heading_deg();
         st_.current = current;
+        st_.vbus_v = vbus_v;
         st_.imu_present = imu_.present();
         st_.imu_ok = imu_ok;
         st_.mag_present = mag_.present();
@@ -731,7 +740,7 @@ std::string app::status_text()
     snprintf(b, sizeof(b),
              "uptime_s=%lld state=%s mode=%s%s rc_src=%u rc_age_ms=%d rc_loss=%u rc_lat_ms=%u rc_frames=%" PRIu32
              " rc_rej=%" PRIu32 " imu=%s gyro_cal=%d mag=%s%s r_cmd=%.1f r_meas=%.1f steer=%.3f"
-             " servo_us=%.0f motor=%s duty=%.3f v_est=%.2f i_a=%.2f bts=%d deadman=%d bts_fault=%d"
+             " servo_us=%.0f motor=%s duty=%.3f v_est=%.2f i_a=%.2f vbus_v=%.2f bts=%d deadman=%d bts_fault=%d"
              " heading=%.1f roll=%.1f pitch=%.1f i2c_err=%" PRIu32 " overruns=%" PRIu32 " loop_max_ms=%.2f",
              static_cast<long long>(now / 1000000), states[static_cast<int>(s.out.st)], modes[static_cast<int>(s.out.mode)],
              s.out.imu_degraded ? "(imu)" : "", link_.source(),
@@ -740,7 +749,7 @@ std::string app::status_text()
              s.imu_present ? (s.imu_ok ? "ok" : "err") : "none", s.gyro_cal, s.mag_kind,
              s.mag_present && !s.mag_ok ? "(no data)" : "", s.out.r_cmd, s.out.r_meas, s.out.servo,
              s.servo_us, s.out.motor == motor_cmd::drive ? "drive" : (s.out.motor == motor_cmd::brake ? "brake" : "coast"),
-             s.out.duty, s.out.v_est, s.current, s.bts_on, s.deadman, s.bts_fault, s.heading, s.roll, s.pitch,
+             s.out.duty, s.out.v_est, s.current, s.vbus_v, s.bts_on, s.deadman, s.bts_fault, s.heading, s.roll, s.pitch,
              s.i2c_errors, s.overruns, s.loop_max_ms);
     return b;
 }
