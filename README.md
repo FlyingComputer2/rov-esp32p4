@@ -168,6 +168,8 @@ Air loss is the receiving L3's `lur` `rxgap` on upstream 2; `rx_push_drop` there
 
 ### Wiring (40-pin header)
 
+Authoritative GPIO constants: [`main/board_pins.hpp`](main/board_pins.hpp) (`rover_board::actuator_pins()` is applied in `main.cpp`).
+
 | Signal | GPIO | Header pin | Notes |
 |--------|------|------------|-------|
 | I2C SDA / SCL | 7 / 8 | 3 / 5 | The board I2C (`ESP_I2C_SDA` / `_SCL`), shared with the camera SCCB (0x36) and the ES8311 (0x18); 2.2 k pull-ups on the board. GY-521 at 0x68, GY-271 at 0x0d (QMC) or 0x1e (HMC) |

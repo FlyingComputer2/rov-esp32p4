@@ -63,6 +63,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "board_pins.hpp"
 #include "rover_sample/rover_sample.hpp"
 #include "sys_applet/applet.hpp"
 #include "vstreamer_idf/live_tx.hpp"
@@ -417,6 +418,7 @@ void start_applets()
     rs.link_to_l3 = k_rc_up.names.to_l3;
     rs.link_from_l3 = k_rc_up.names.from_l3;
     rs.console = k_rover_sample_console;
+    rs.pin = rover_board::actuator_pins();
     rs.pin.i2c_port = k_board_i2c_port;
     if (!car.configure(rs) || !car.start())
     {
