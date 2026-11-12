@@ -554,8 +554,7 @@ vstreamer::idf::live_tx_config video_config()
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
     /* In order: fec_k before fec_n, since k may not exceed the current n (sender starts at
      * k=10, n=12). */
-    cfg.snd = {{"telemetry", "off"}, {"fec", "block"},       {"fec_k", "6"},
-               {"fec_n", "8"},       {"fec_spread_ms", "4"}};
+    cfg.snd = {{"fec", "block"}, {"fec_k", "6"}, {"fec_n", "8"}, {"fec_spread_ms", "4"}};
     return cfg;
 }
 
