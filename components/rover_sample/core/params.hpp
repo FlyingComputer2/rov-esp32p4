@@ -49,6 +49,7 @@ enum param_id : uint8_t
     p_mag_off_x = 50,
     p_mag_off_y = 51,
     p_mag_off_z = 52,
+    p_ch3 = 53,  // CH3 normalized command -1..1 when no RC aux2
     p_id_end = 54,
 };
 

@@ -10,11 +10,13 @@ Source code is the authoritative map for actuator GPIOs; this document explains
 wiring, LEDC usage, pins the firmware already owns elsewhere, and what to
 avoid when adding hardware.
 
-## Actuators (steering + BTS7960)
+## Actuators (servos CH1–CH3 + BTS7960)
 
 | Signal | ESP32-P4 GPIO | 40-pin header | Driver | Notes |
 |--------|---------------|---------------|--------|-------|
-| Servo PWM | **3** | **19** | LEDC timer **2**, channel **4**, 14-bit, default 50 Hz (`servo_hz`) | Use a **separate 5–6 V** supply for the servo; **common GND** with the P4 and motor logic |
+| **CH1** steering PWM | **3** | **19** | LEDC timer **2**, channel **4**, 14-bit, default 50 Hz (`servo_hz`) | Steering servo; separate 5–6 V supply, common GND |
+| **CH2** aux PWM | **24** | *(header TBD)* | LEDC timer **2**, channel **0** | Driven from RC `aux` (‑1..1 → `servo_*_us`) |
+| **CH3** aux PWM | **26** | *(header TBD)* | LEDC timer **2**, channel **1** | Driven from param `ch3` or disarmed `servo_us ch3` |
 | BTS RPWM | **4** | **18** | LEDC timer **3**, channel **5**, 10-bit, default 20 kHz (`bts_pwm_hz`) | Forward bridge PWM |
 | BTS LPWM | **5** | **16** | LEDC timer **3**, channel **6** | Reverse / brake low-side PWM |
 | BTS EN (R_EN + L_EN tied) | **6** | **15** | LEDC timer **3**, channel **7** | **10 kΩ pulldown to GND** on the module so a P4 reset **coasts** the motor. Deadman GPTimer forces EN low if the 250 Hz control loop stalls 50 ms |
@@ -29,10 +31,10 @@ avoid when adding hardware.
 
 Firmware reads VBUS every control cycle and prints `vbus_v` on the periodic `ROVER_SAMPLE` status line and in `status` on UDP 5120. Calibrate `vbus_div` against a meter (`set vbus_div <ratio>` then `save`).
 
-LED assignments are fixed in
-[`components/rover_sample/src/drivers.cpp`](../components/rover_sample/src/drivers.cpp)
-(timer 2 = servo, timer 3 = BTS; LEDC channels 4–7). Timers 0–1 and channels
-0–3 are left unused for other features.
+LEDC assignments are fixed in
+[`components/rover_sample/src/drivers.cpp`](../components/rover_sample/src/drivers.cpp):
+timer **2** = all servos (CH1 ch **4**, CH2 ch **0**, CH3 ch **1**); timer **3** =
+BTS (ch **5–7**). Timer 0–1 and LEDC channels 2–3 are unused.
 
 The BTS7960 driver is **not** brought up until
 `set bts_enabled 1` (disarmed only). Until then, those GPIOs are not configured
@@ -43,7 +45,7 @@ as PWM outputs.
 Disarmed only (`servo_us` on UDP console 5120):
 
 ```bash
-echo "servo_us 1250" | nc -u -w1 <rover-ip> 5120   # sweep left/right/center
+echo "servo_us ch1 1250" | nc -u -w1 <rover-ip> 5120   # sweep CH1 left/right/center (ch2/ch3 likewise)
 echo "set servo_min_us 1250" | nc -u -w1 <rover-ip> 5120
 echo save | nc -u -w1 <rover-ip> 5120
 ```

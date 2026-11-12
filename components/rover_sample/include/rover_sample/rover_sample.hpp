@@ -24,7 +24,11 @@ struct pins
     // I2C master bus the host created before applet init (shared with the
     // camera SCCB and the codec: GPIO7 SDA, pin 3 / GPIO8 SCL, pin 5).
     int i2c_port = 0;
+    /** CH1 steering servo PWM GPIO; -1 disables. */
     int servo = 3;
+    /** CH2 / CH3 auxiliary servo PWM; -1 disables. */
+    int servo_ch2 = -1;
+    int servo_ch3 = -1;
     int bts_rpwm = 4;
     int bts_lpwm = 5;
     int bts_en = 6;

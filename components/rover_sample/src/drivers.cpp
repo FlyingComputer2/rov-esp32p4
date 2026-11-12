@@ -63,11 +63,11 @@ int16_t le16(const uint8_t* p)
     return static_cast<int16_t>((p[1] << 8) | p[0]);
 }
 
-/* LEDC: the P4 has low-speed mode only. Timer 2 servo, timer 3 BTS; channels
- * 4-7. Timers / channels 0-1 / 0-3 are left free. */
+/* LEDC: the P4 has low-speed mode only. Timer 2 = all servos (CH1 ch4, CH2 ch0,
+ * CH3 ch1); timer 3 = BTS ch5-7. Channels 2-3 are unused. */
 constexpr ledc_mode_t k_mode = LEDC_LOW_SPEED_MODE;
 constexpr ledc_timer_t k_servo_timer = LEDC_TIMER_2;
-constexpr ledc_channel_t k_servo_ch = LEDC_CHANNEL_4;
+bool servo_timer_ready = false;
 constexpr ledc_timer_bit_t k_servo_bits = LEDC_TIMER_14_BIT;
 constexpr ledc_timer_t k_bts_timer = LEDC_TIMER_3;
 constexpr ledc_channel_t k_bts_ch[3] = {LEDC_CHANNEL_5, LEDC_CHANNEL_6, LEDC_CHANNEL_7};
@@ -234,10 +234,25 @@ bool magnetometer::read(float m[3])
     return true;
 }
 
-bool servo::init(int gpio, int hz)
+bool servo::init(int gpio, int hz, int ledc_ch)
 {
     hz_ = hz;
-    ok_ = ledc_timer(k_servo_timer, k_servo_bits, hz) && ledc_channel(k_servo_ch, k_servo_timer, gpio);
+    ch_ = static_cast<ledc_channel_t>(ledc_ch);
+    if (gpio < 0)
+    {
+        ok_ = false;
+        return false;
+    }
+    if (!servo_timer_ready)
+    {
+        if (!ledc_timer(k_servo_timer, k_servo_bits, hz))
+        {
+            ok_ = false;
+            return false;
+        }
+        servo_timer_ready = true;
+    }
+    ok_ = ledc_channel(ch_, k_servo_timer, gpio);
     return ok_;
 }
 
@@ -265,8 +280,8 @@ void servo::set_us(float us)
     }
     const float period_us = 1e6f / hz_;
     const uint32_t duty = static_cast<uint32_t>(us / period_us * ((1u << k_servo_bits) - 1));
-    ledc_set_duty(k_mode, k_servo_ch, duty);
-    ledc_update_duty(k_mode, k_servo_ch);
+    ledc_set_duty(k_mode, ch_, duty);
+    ledc_update_duty(k_mode, ch_);
 }
 
 static float adc_volts(adc_oneshot_unit_handle_t adc, adc_cali_handle_t cali, adc_channel_t ch)

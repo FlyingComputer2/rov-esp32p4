@@ -176,7 +176,9 @@ Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
 | Signal | GPIO | Header pin | Notes |
 |--------|------|------------|-------|
 | I2C SDA / SCL | 7 / 8 | 3 / 5 | The board I2C (`ESP_I2C_SDA` / `_SCL`), shared with the camera SCCB (0x36) and the ES8311 (0x18); 2.2 k pull-ups on the board. GY-521 at 0x68, GY-271 at 0x0d (QMC) or 0x1e (HMC) |
-| Servo PWM | 3 | 19 | Separate 5–6 V supply for the servo, common ground |
+| CH1 steering PWM | 3 | 19 | Separate 5–6 V supply, common ground |
+| CH2 aux PWM | 24 | — | RC `aux` stick |
+| CH3 aux PWM | 26 | — | `set ch3` (‑1..1) or bench `servo_us ch3` |
 | BTS7960 RPWM / LPWM | 4 / 5 | 18 / 16 | 20 kHz |
 | BTS7960 R_EN + L_EN | 6 | 15 | Tied together; 10 k pull-down to GND so a P4 reset coasts |
 | BTS7960 R_IS / L_IS | 21 / 23 | 11 / 7 | ADC1, through a divider (IS reaches ~5 V); ratio in `is_div` |
@@ -221,7 +223,7 @@ One command per datagram, reply to the sender. `set` applies from the next contr
 | `gyro_cal` | Disarmed only; keep the car still 2 s |
 | `mag_cal start` / `mag_cal stop` | Hard-iron calibration: turn the car through every heading in between; `stop` sets `mag_off_*` (then `save`) |
 | `rc <steer> <thr> <arm> [hold_ms]` | Bench RC (-1..1), repeated at 50 Hz for `hold_ms` (max 10 s) |
-| `servo_us <us>` | Disarmed only: raw servo pulse, for finding the endpoints; `servo_us 0` or arming ends it |
+| `servo_us [ch1\|ch2\|ch3] <us>` | Disarmed only: raw PWM µs per channel (`servo_us 1500` = CH1 legacy); `0` or arming clears override |
 
 Parameters (`list` prints them; defaults are placeholders until the car is measured):
 
@@ -231,7 +233,7 @@ Parameters (`list` prints them; defaults are placeholders until the car is measu
 | Geometry | `steer_max_deg` 30 (wheel angle at full throw), `wheelbase_m` 0.26 |
 | Steering | `mode` 1, `rate_max_dps` 360, `a_lat_max` 8, `expo` 0.3, `kp` 0.004, `ki` 0.02, `kff` 1, `blend_v0` 0.5, `blend_v1` 1.5, `hold_kp` 2, `gyro_lpf_hz` 42, `imu_yaw_sign` -1 |
 | Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000, `vbus_div` 12 |
-| Link | `failsafe_ms` 300, `telem_hz` 20 |
+| Link | `failsafe_ms` 300, `telem_hz` 20, `ch3` 0 (CH3 normalized command) |
 | Compass | `mag_off_x` / `_y` / `_z` (from `mag_cal`) |
 
 ```bash

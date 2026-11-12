@@ -7,6 +7,7 @@
 
 #include "driver/gptimer.h"
 #include "driver/i2c_master.h"
+#include "driver/ledc.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_oneshot.h"
 
@@ -59,21 +60,27 @@ class magnetometer
     bool qmc_ = false;
 };
 
-// Steering servo on LEDC timer 2 / channel 4.
+// RC servo PWM on LEDC timer 2 (channels 0–3 and 4; CH1 steering uses ch 4).
 class servo
 {
    public:
-    bool init(int gpio, int hz);
+    // ledc_ch: LEDC_CHANNEL_0..7; gpio < 0 skips output (channel disabled).
+    bool init(int gpio, int hz, int ledc_ch);
     bool set_hz(int hz);
     void set_us(float us);
     float us() const
     {
         return us_;
     }
+    bool ok() const
+    {
+        return ok_;
+    }
 
    private:
     int hz_ = 50;
     float us_ = 0;
+    ledc_channel_t ch_ = LEDC_CHANNEL_4;
     bool ok_ = false;
 };
 
