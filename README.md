@@ -168,7 +168,10 @@ Air loss is the receiving L3's `lur` `rxgap` on upstream 2; `rx_push_drop` there
 
 ### Wiring (40-pin header)
 
-Authoritative GPIO constants: [`main/board_pins.hpp`](main/board_pins.hpp) (`rover_board::actuator_pins()` is applied in `main.cpp`).
+Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
+[`docs/board-pins.md`](docs/board-pins.md). Actuator constants live in
+[`main/board_pins.hpp`](main/board_pins.hpp); `main.cpp` applies
+`rover_board::actuator_pins()` before `rover_sample` starts.
 
 | Signal | GPIO | Header pin | Notes |
 |--------|------|------------|-------|

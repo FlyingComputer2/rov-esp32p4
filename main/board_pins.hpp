@@ -1,6 +1,8 @@
 // GPIO allocation for the Waveshare ESP32-P4-WIFI6-DEV-KIT (40-pin header P6).
-// Steering (LEDC timer 2) and BTS7960 (LEDC timer 3) stay off SDIO, C6 UART,
-// krono GPIO20, status LED GPIO22, and board I2C GPIO7/8.
+// Documented in docs/board-pins.md (wiring, LEDC timers, reserved pins).
+// Steering uses LEDC timer 2 / ch 4; BTS7960 uses timer 3 / ch 5–7 — see
+// rover_sample/src/drivers.cpp. Actuator GPIOs avoid SDIO (14–19), krono 20,
+// LED 22, C6 control (46–48, 47, 54), and board I2C 7/8.
 #pragma once
 
 #include <cstdint>
