@@ -23,7 +23,7 @@ FetchContent_Declare(bfc
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG fcf54c901ac843612aced874ac5a715737632d74
+    GIT_TAG 4255053470eb485356b9623e578ecd384165a03a
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
@@ -33,7 +33,7 @@ FetchContent_Declare(winject_sdio_proxy
 # is declared first wins, so keep their pins equal.
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 00b5e53a0443456c8836e3282c3fa809f2b005e4
+    GIT_TAG aa8caeff1b2fb61a70831137c2cbc1965dac0d08
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono

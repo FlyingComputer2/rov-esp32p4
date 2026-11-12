@@ -44,6 +44,10 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_eth.h"
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#include "esp_eth_phy_ip101.h"
+#endif
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"

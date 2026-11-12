@@ -30,7 +30,7 @@ idf.py -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=~/development/winject-l3 \
 
 ## Build and flash
 
-Native ESP-IDF v5.5 (`. ~/esp/esp-idf-v5.5.5/export.sh`); P4 USB-UART on the Type-C "UART" port:
+Build with ESP-IDF at the commit recorded in `IDF_COMMIT` (6.2 development); install its ESP32-P4 tools and source its `export.sh` first. The tracked `dependencies.lock` fixes the managed component versions. P4 USB-UART is on the Type-C "UART" port:
 
 ```bash
 idf.py set-target esp32p4 build && idf.py -p /dev/ttyACM0 flash
