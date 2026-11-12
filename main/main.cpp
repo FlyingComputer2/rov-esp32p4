@@ -155,7 +155,7 @@ constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 1
  * channel 13 (~7% isolated frame loss) 6 Mbit/s with FEC 21/31 and 75 ms
  * spread gave 0-0.7% residual loss at 22-27 fps, 10/12 left 3.8% (3.6 fps)
  * and 15/31 ran core 0 out of time; on channel 1 (~1% loss) every FEC tried
- * was clean. Bitrate (src bitrate), FEC and spread can be changed at run time
+ * was clean. Bitrate (src bitrate, kbit/s), FEC and spread can be changed at run time
  * on the vstreamer m-plane (UDP 5090), where `set tx pause 1` / `0` also
  * pauses and resumes live TX. */
 constexpr int k_video_mplane_port = 5090;
@@ -550,7 +550,7 @@ vstreamer::idf::live_tx_config video_config()
     cfg.mplane_port = k_video_mplane_port;
     /* On the app reactor (core 1), not a vs_mplane thread of its own. */
     cfg.mplane_reactor = k_apps_reactor;
-    cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000000"},
+    cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
     /* In order: fec_k before fec_n, since k may not exceed the current n (sender starts at
      * k=10, n=12). */
