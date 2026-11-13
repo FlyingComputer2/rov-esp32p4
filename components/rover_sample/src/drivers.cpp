@@ -392,7 +392,11 @@ bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz)
         return false;
     }
 
-    if (!is_r_.init(r_is) || !is_l_.init(l_is))
+    if (r_is < 0 || l_is < 0)
+    {
+        ESP_LOGI(TAG, "BTS7960 without current sense: current reads 0, no IS overload check");
+    }
+    else if (!is_r_.init(r_is) || !is_l_.init(l_is))
     {
         ESP_LOGW(TAG, "BTS7960 IS on GPIO%d/%d: no ADC, current reads 0", r_is, l_is);
     }

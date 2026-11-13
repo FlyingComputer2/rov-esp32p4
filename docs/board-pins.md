@@ -20,8 +20,8 @@ avoid when adding hardware.
 | BTS RPWM | **4** | **18** | LEDC timer **3**, channel **5**, 10-bit, default 20 kHz (`bts_pwm_hz`) | Forward bridge PWM |
 | BTS LPWM | **5** | **16** | LEDC timer **3**, channel **6** | Reverse / brake low-side PWM |
 | BTS EN (R_EN + L_EN tied) | **6** | **15** | LEDC timer **3**, channel **7** | **10 kΩ pulldown to GND** on the module so a P4 reset **coasts** the motor. Deadman GPTimer forces EN low if the 250 Hz control loop stalls 50 ms |
-| BTS R_IS | **21** | **11** | ADC1 | Current sense via divider (`is_div`, `is_r_ohm`) |
-| BTS L_IS | **23** | **7** | ADC1 | Same |
+| BTS R_IS | (**21**) | (**11**) | ADC1 | **Not wired, disabled** (`GPIO_NUM_NC` in `board_pins.hpp`). Current sense via divider (`is_div`, `is_r_ohm`) when used |
+| BTS L_IS | (**23**) | (**7**) | ADC1 | Same |
 
 ## VBUS voltage (divider → ADC)
 

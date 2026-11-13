@@ -24,8 +24,11 @@ constexpr gpio_num_t k_servo_ch3_pwm = GPIO_NUM_26;  // CH3 (RC aux2), header pi
 constexpr gpio_num_t k_bts_rpwm = GPIO_NUM_4;   // header pin 18
 constexpr gpio_num_t k_bts_lpwm = GPIO_NUM_5;   // header pin 16
 constexpr gpio_num_t k_bts_en = GPIO_NUM_6;     // header pin 15 (10k pulldown)
-constexpr gpio_num_t k_bts_r_is = GPIO_NUM_21;  // header pin 11, ADC1
-constexpr gpio_num_t k_bts_l_is = GPIO_NUM_23;  // header pin 7, ADC1
+// Current sense: not wired on this car. Unconnected pins float, and a floating IS
+// reading trips the 4 V overload fault. To use it, wire R_IS / L_IS through the
+// divider to GPIO21 (header 11) / GPIO23 (header 7), both ADC1, and set them here.
+constexpr gpio_num_t k_bts_r_is = GPIO_NUM_NC;
+constexpr gpio_num_t k_bts_l_is = GPIO_NUM_NC;
 
 // --- VBUS / battery divider (high side to VBUS, tap to the pin, low side to GND) ---
 // GPIO53 = ADC2 ch4, header pin 35. On this board it is also PA_CTRL (0R R73 into
