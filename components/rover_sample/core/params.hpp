@@ -51,7 +51,8 @@ enum param_id : uint8_t
     p_mag_off_z = 52,
     p_ch2_failsafe = 53,  // CH2 position in failsafe / fault, -1..1
     p_ch3_failsafe = 54,  // CH3 position in failsafe / fault, -1..1
-    p_id_end = 55,
+    p_imu_enabled = 55,   // 0: ignore the IMU (no reads, arm allowed, direct steering)
+    p_id_end = 56,
 };
 
 enum : uint8_t

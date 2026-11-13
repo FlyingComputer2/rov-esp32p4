@@ -429,9 +429,15 @@ void app::control_task()
             printf("rover_sample: BTS7960 %s\n", bts_on ? "on" : "off");
         }
 
-        // IMU.
+        // IMU (imu_enabled 0: not read at all; the controller then arms
+        // without gyro calibration and steers direct).
         float g[3] {}, a[3] {};
-        if (!imu_.present())
+        const bool imu_wanted = p.get(p_imu_enabled) >= 1.f;
+        if (!imu_wanted)
+        {
+            imu_fail = k_imu_fail_limit;
+        }
+        else if (!imu_.present())
         {
             // Init holds the loop ~100 ms (MPU reset), past the deadman, so
             // only while disarmed; the trip it causes is expected.

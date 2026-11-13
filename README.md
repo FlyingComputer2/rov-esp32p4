@@ -236,6 +236,7 @@ Parameters (`list` prints them; defaults are placeholders until the car is measu
 | Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000, `vbus_div` 12 |
 | Link | `failsafe_ms` 300, `telem_hz` 20, `ch2_failsafe` / `ch3_failsafe` 0 (-1..1: CH2 / CH3 position without live RC, in failsafe or fault) |
 | Compass | `mag_off_x` / `_y` / `_z` (from `mag_cal`) |
+| IMU | `imu_enabled` 1 (disarmed only; 0 ignores the GY-521: no reads, arms without gyro calibration, steering always direct, attitude telemetry frozen) |
 
 ```bash
 echo status | nc -u -w1 192.168.253.28 5120
