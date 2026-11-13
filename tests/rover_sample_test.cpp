@@ -92,10 +92,15 @@ void test_protocol()
     t.roll = -12345;
     t.heading = 35999;
     t.flags = 0x3f;
+    t.vbus = 1234;
+    t.rssi = -67;
     auto tp = pack(t);
     CHECK(tp.size() == k_telem_bytes);
     auto tb = unpack_telem(tp);
     CHECK(tb && tb->seq == 7 && tb->roll == -12345 && tb->heading == 35999 && tb->flags == 0x3f);
+    CHECK(tb->vbus == 1234 && tb->rssi == -67);
+    auto tv1 = unpack_telem(std::vector<uint8_t>(tp.begin(), tp.begin() + k_telem_bytes_v1));
+    CHECK(tv1 && tv1->flags == 0x3f && tv1->vbus == 0 && tv1->rssi == 0);
 
     uint8_t id;
     float v;

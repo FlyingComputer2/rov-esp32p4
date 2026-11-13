@@ -75,6 +75,9 @@ public:
     bool configure(const config& cfg);
     // False when the control task or the console cannot be started.
     bool start();
+    // RSSI (dBm) of the ground's frames at this radio, from the host's radio
+    // poll; sent in telemetry while fresh (2 s). Any thread.
+    void set_link_rssi(int dbm);
 
 private:
     struct Impl;

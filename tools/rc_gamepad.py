@@ -155,8 +155,8 @@ def main():
             while True:
                 data, _ = sock.recvfrom(512)
                 f = msp_decode(data)
-                if f and f[1] == FUNC_TELEM and len(f[2]) == TELEM.size:
-                    last_telem = TELEM.unpack(f[2])
+                if f and f[1] == FUNC_TELEM and len(f[2]) >= TELEM.size:  # 42 B adds vbus, rssi
+                    last_telem = TELEM.unpack(f[2][:TELEM.size])
         except BlockingIOError:
             pass
         if now >= next_print:

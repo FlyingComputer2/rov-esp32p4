@@ -156,6 +156,11 @@ class app
 {
    public:
     explicit app(const config& cfg) : cfg_(cfg) {}
+    void set_link_rssi(int dbm)
+    {
+        link_rssi_.store(dbm, std::memory_order_relaxed);
+        link_rssi_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+    }
     bool configure();
     bool start();
     // Reactor thread: drain RC, send telemetry when due; one console line.
@@ -186,6 +191,8 @@ class app
     void arm_tick();
     void console_readable(int fd);
     bool configured_ = false;
+    std::atomic<int> link_rssi_ {0};
+    std::atomic<int64_t> link_rssi_us_ {INT64_MIN / 2};
     mpu6050 imu_;
     magnetometer mag_;
     servo servo_[3];
@@ -695,10 +702,15 @@ void app::send_telem()
         t.i_motor = usat16(s.current * 100);
         t.rc_loss = link_.loss_permille();
         t.rc_lat_ms = link_.latency_p50_ms();
+        t.vbus = usat16(s.vbus_v * 100);
         t.flags = (s.imu_ok ? k_telem_imu_ok : 0) | (s.mag_ok ? k_telem_mag_ok : 0) |
                   (s.gyro_cal ? k_telem_gyro_cal : 0) | (s.bts_on ? k_telem_bts_enabled : 0) |
                   (s.deadman ? k_telem_deadman : 0) | (s.out.imu_degraded ? k_telem_imu_degraded : 0) |
                   (s.out.motor == motor_cmd::brake ? k_telem_braking : 0);
+    }
+    if (now - link_rssi_us_.load(std::memory_order_relaxed) < 2000000)
+    {
+        t.rssi = static_cast<int8_t>(link_rssi_.load(std::memory_order_relaxed));
     }
     t.seq = telem_seq_++;
     t.t_us = realtime_us32();
@@ -1090,6 +1102,14 @@ bool Applet::configure(const config& cfg)
     }
     impl_->instance = a;
     return true;
+}
+
+void Applet::set_link_rssi(int dbm)
+{
+    if (impl_->instance)
+    {
+        impl_->instance->set_link_rssi(dbm);
+    }
 }
 
 bool Applet::start()
