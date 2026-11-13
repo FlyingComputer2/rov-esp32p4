@@ -109,7 +109,8 @@ class adc_input
 class bts7960
 {
    public:
-    bool init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz);
+    // en drives R_EN; l_en (>= 0) gets the same LEDC signal on a second pin (L_EN).
+    bool init(int rpwm, int lpwm, int en, int l_en, int r_is, int l_is, int pwm_hz);
     void deinit();
     bool enabled() const
     {
@@ -130,13 +131,14 @@ class bts7960
     void duty(int ch, float d);
     bool ok_ = false;
     int en_ = -1;
+    int l_en_ = -1;
     int pins_[3] {-1, -1, -1};
     adc_input is_r_, is_l_;
     float overload_t_ = 0;
 };
 
 // One-shot GPTimer; kick() every control cycle. If 50 ms pass without one,
-// the ISR forces the BTS EN pin low and latches tripped().
+// the ISR forces the BTS EN pin(s) low and latches tripped().
 class deadman
 {
    public:
@@ -147,8 +149,9 @@ class deadman
         return tripped_.load();
     }
     void clear();
-    void set_en_gpio(int gpio)
+    void set_en_gpio(int gpio, int gpio2 = -1)
     {
+        en_gpio2_.store(gpio2);
         en_gpio_.store(gpio);
     }
 
@@ -156,6 +159,7 @@ class deadman
     static bool on_alarm(gptimer_handle_t, const gptimer_alarm_event_data_t*, void* arg);
     gptimer_handle_t timer_ = nullptr;
     std::atomic<int> en_gpio_ {-1};
+    std::atomic<int> en_gpio2_ {-1};
     std::atomic<bool> tripped_ {false};
 };
 

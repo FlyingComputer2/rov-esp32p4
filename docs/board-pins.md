@@ -19,9 +19,10 @@ avoid when adding hardware.
 | **CH3** aux PWM | **26** | **31** | LEDC timer **2**, channel **1** | RC `aux2`; `ch3_failsafe` without live RC |
 | BTS RPWM | **4** | **18** | LEDC timer **3**, channel **5**, 10-bit, default 20 kHz (`bts_pwm_hz`) | Forward bridge PWM |
 | BTS LPWM | **5** | **16** | LEDC timer **3**, channel **6** | Reverse / brake low-side PWM |
-| BTS EN (R_EN + L_EN tied) | **6** | **15** | LEDC timer **3**, channel **7** | **10 kΩ pulldown to GND** on the module so a P4 reset **coasts** the motor. Deadman GPTimer forces EN low if the 250 Hz control loop stalls 50 ms |
-| BTS R_IS | (**21**) | (**11**) | ADC1 | **Not wired, disabled** (`GPIO_NUM_NC` in `board_pins.hpp`). Current sense via divider (`is_div`, `is_r_ohm`) when used |
-| BTS L_IS | (**23**) | (**7**) | ADC1 | Same |
+| BTS R_EN | **6** | **15** | LEDC timer **3**, channel **7** | **10 kΩ pulldown to GND** so a P4 reset **coasts** the motor. Deadman GPTimer forces EN low if the 250 Hz control loop stalls 50 ms |
+| BTS L_EN | **21** | **11** | Same LEDC channel **7** (second pin) | Separate wire for L_EN, same signal; its own 10 kΩ pulldown. The deadman drives it low too. Set `bts_l_en = -1` to tie L_EN to R_EN again |
+| BTS R_IS | — | — | ADC1 | **Not wired, disabled** (`GPIO_NUM_NC` in `board_pins.hpp`). Current sense via divider (`is_div`, `is_r_ohm`) when used; GPIO23 (header 7) is a free ADC1 pin |
+| BTS L_IS | — | — | ADC1 | Same |
 
 ## VBUS voltage (divider → ADC)
 

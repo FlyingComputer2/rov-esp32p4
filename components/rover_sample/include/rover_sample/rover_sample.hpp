@@ -31,7 +31,8 @@ struct pins
     int servo_ch3 = -1;
     int bts_rpwm = 4;
     int bts_lpwm = 5;
-    int bts_en = 6;
+    int bts_en = 6;     // R_EN (and L_EN when they are tied)
+    int bts_l_en = -1;  // L_EN on its own pin, same signal as R_EN; -1 = tied to bts_en
     int bts_r_is = 21;
     int bts_l_is = 23;
     /** VBUS sense ADC GPIO (any ADC unit); -1 disables. */

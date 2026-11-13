@@ -23,10 +23,11 @@ constexpr gpio_num_t k_servo_ch3_pwm = GPIO_NUM_26;  // CH3 (RC aux2), header pi
 // --- BTS7960 / IBT-2 motor bridge (20 kHz PWM; EN tied R_EN+L_EN) ---
 constexpr gpio_num_t k_bts_rpwm = GPIO_NUM_4;   // header pin 18
 constexpr gpio_num_t k_bts_lpwm = GPIO_NUM_5;   // header pin 16
-constexpr gpio_num_t k_bts_en = GPIO_NUM_6;     // header pin 15 (10k pulldown)
+constexpr gpio_num_t k_bts_en = GPIO_NUM_6;     // R_EN, header pin 15 (10k pulldown)
+constexpr gpio_num_t k_bts_l_en = GPIO_NUM_21;  // L_EN, header pin 11 (10k pulldown), same signal
 // Current sense: not wired on this car. Unconnected pins float, and a floating IS
 // reading trips the 4 V overload fault. To use it, wire R_IS / L_IS through the
-// divider to GPIO21 (header 11) / GPIO23 (header 7), both ADC1, and set them here.
+// divider to ADC1 pins (GPIO23, header 7, is free; GPIO21 is now L_EN) and set them here.
 constexpr gpio_num_t k_bts_r_is = GPIO_NUM_NC;
 constexpr gpio_num_t k_bts_l_is = GPIO_NUM_NC;
 
@@ -47,6 +48,7 @@ inline rover_sample::pins actuator_pins()
     p.bts_rpwm = static_cast<int>(k_bts_rpwm);
     p.bts_lpwm = static_cast<int>(k_bts_lpwm);
     p.bts_en = static_cast<int>(k_bts_en);
+    p.bts_l_en = static_cast<int>(k_bts_l_en);
     p.bts_r_is = static_cast<int>(k_bts_r_is);
     p.bts_l_is = static_cast<int>(k_bts_l_is);
     p.vbus_adc = static_cast<int>(k_vbus_sense);

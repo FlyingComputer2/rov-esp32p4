@@ -180,8 +180,9 @@ Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
 | CH2 aux PWM | 2 | 21 | RC `aux` → 1000–2000 µs (not the steering trims); `ch2_failsafe` without live RC |
 | CH3 aux PWM | 26 | 31 | RC `aux2` → 1000–2000 µs; `ch3_failsafe` without live RC |
 | BTS7960 RPWM / LPWM | 4 / 5 | 18 / 16 | 20 kHz |
-| BTS7960 R_EN + L_EN | 6 | 15 | Tied together; 10 k pull-down to GND so a P4 reset coasts |
-| BTS7960 R_IS / L_IS | (21 / 23) | (11 / 7) | **Not wired; disabled in `board_pins.hpp`** (current reads 0, no IS overload fault). To use: ADC1 through a divider (IS reaches ~5 V), ratio in `is_div` |
+| BTS7960 R_EN | 6 | 15 | 10 k pull-down to GND so a P4 reset coasts |
+| BTS7960 L_EN | 21 | 11 | Separate wire, same signal as R_EN (`bts_l_en`); own 10 k pull-down. Deadman pulls both low |
+| BTS7960 R_IS / L_IS | — | — | **Not wired; disabled in `board_pins.hpp`** (current reads 0, no IS overload fault). To use: ADC1 pins through a divider (IS reaches ~5 V), ratio in `is_div` |
 | VBUS sense | 53 | 35 | ADC2, divider from the pack / BEC; ratio in `vbus_div` (default 12). Also the board's speaker-amp PA_CTRL (high-Z gate input) |
 | 3V3 / 5V / GND | | 1, 17 / 2, 4 / 6, 9, 14, 20, 25, 30, 34, 39 | |
 

@@ -421,10 +421,11 @@ void app::control_task()
         {
             bts_.deinit();
             bts_on = want_bts &&
-                     bts_.init(cfg_.pin.bts_rpwm, cfg_.pin.bts_lpwm, cfg_.pin.bts_en, cfg_.pin.bts_r_is,
+                     bts_.init(cfg_.pin.bts_rpwm, cfg_.pin.bts_lpwm, cfg_.pin.bts_en, cfg_.pin.bts_l_en,
+                               cfg_.pin.bts_r_is,
                                cfg_.pin.bts_l_is, want_bts_hz);
             applied_bts_hz = want_bts_hz;
-            deadman_.set_en_gpio(bts_on ? cfg_.pin.bts_en : -1);
+            deadman_.set_en_gpio(bts_on ? cfg_.pin.bts_en : -1, bts_on ? cfg_.pin.bts_l_en : -1);
             printf("rover_sample: BTS7960 %s\n", bts_on ? "on" : "off");
         }
 

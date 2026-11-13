@@ -375,16 +375,22 @@ float adc_input::read_v() const
     return raw * 3.3f / 4095.f;
 }
 
-bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz)
+bool bts7960::init(int rpwm, int lpwm, int en, int l_en, int r_is, int l_is, int pwm_hz)
 {
     pins_[k_r] = rpwm;
     pins_[k_l] = lpwm;
     pins_[k_en] = en;
     en_ = en;
+    l_en_ = l_en;
     ok_ = ledc_timer(k_bts_timer, k_bts_bits, pwm_hz);
     for (int i = 0; i < 3 && ok_; ++i)
     {
         ok_ = ledc_channel(k_bts_ch[i], k_bts_timer, pins_[i]);
+    }
+    if (ok_ && l_en_ >= 0)
+    {
+        // L_EN wired apart from R_EN: route the same EN channel to it.
+        ok_ = ledc_set_pin(l_en_, k_mode, k_bts_ch[k_en]) == ESP_OK;
     }
     if (!ok_)
     {
@@ -473,6 +479,10 @@ void bts7960::reattach()
     if (ok_)
     {
         ledc_channel(k_bts_ch[k_en], k_bts_timer, en_);
+        if (l_en_ >= 0)
+        {
+            ledc_set_pin(l_en_, k_mode, k_bts_ch[k_en]);
+        }
         duty(k_en, 0);
     }
 }
@@ -480,12 +490,16 @@ void bts7960::reattach()
 bool IRAM_ATTR deadman::on_alarm(gptimer_handle_t, const gptimer_alarm_event_data_t*, void* arg)
 {
     auto* self = static_cast<deadman*>(arg);
-    const int en = self->en_gpio_.load();
-    if (en >= 0)
+    // Take EN (R_EN, and L_EN when on its own pin) off LEDC and drive it low:
+    // the bridge coasts.
+    const int pins[2] = {self->en_gpio_.load(), self->en_gpio2_.load()};
+    for (int en : pins)
     {
-        // Take EN off LEDC and drive it low: the bridge coasts.
-        esp_rom_gpio_connect_out_signal(en, SIG_GPIO_OUT_IDX, false, false);
-        gpio_ll_set_level(&GPIO, en, 0);
+        if (en >= 0)
+        {
+            esp_rom_gpio_connect_out_signal(en, SIG_GPIO_OUT_IDX, false, false);
+            gpio_ll_set_level(&GPIO, en, 0);
+        }
     }
     self->tripped_.store(true);
     return false;
