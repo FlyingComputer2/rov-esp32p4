@@ -38,6 +38,40 @@ constexpr gpio_num_t k_bts_l_is = GPIO_NUM_NC;
 // ADC pins on the header are 20 (krono), 21/23 (BTS IS) and 22 (LED).
 constexpr gpio_num_t k_vbus_sense = GPIO_NUM_53;
 
+/**
+ * First thing in app_main: BTS RPWM / LPWM / R_EN / L_EN as outputs driven low,
+ * internal pull-downs on, so the bridge stays off from app start until
+ * rover_sample enables it (`bts_enabled 1`). From reset until here the pins float
+ * (P4 reset state: no pull); only external 10 k pull-downs on R_EN / L_EN cover
+ * that.
+ */
+inline void hold_bts_off()
+{
+    const gpio_num_t pins[] = {k_bts_rpwm, k_bts_lpwm, k_bts_en, k_bts_l_en};
+    uint64_t mask = 0;
+    for (gpio_num_t p : pins)
+    {
+        if (p >= 0)
+        {
+            mask |= 1ULL << p;
+        }
+    }
+    gpio_config_t io = {};
+    io.pin_bit_mask = mask;
+    io.mode = GPIO_MODE_OUTPUT;
+    io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    io.pull_up_en = GPIO_PULLUP_DISABLE;
+    io.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&io);
+    for (gpio_num_t p : pins)
+    {
+        if (p >= 0)
+        {
+            gpio_set_level(p, 0);
+        }
+    }
+}
+
 /** Actuator pins passed into rover_sample (I2C port filled by main). */
 inline rover_sample::pins actuator_pins()
 {

@@ -705,6 +705,8 @@ extern "C" void IRAM_ATTR __wrap_esp_restart_noos(void)
 
 extern "C" void app_main(void)
 {
+    // Motor bridge off before anything else (see board_pins.hpp).
+    rover_board::hold_bts_off();
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
