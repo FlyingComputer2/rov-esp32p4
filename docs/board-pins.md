@@ -15,8 +15,8 @@ avoid when adding hardware.
 | Signal | ESP32-P4 GPIO | 40-pin header | Driver | Notes |
 |--------|---------------|---------------|--------|-------|
 | **CH1** steering PWM | **3** | **19** | LEDC timer **2**, channel **4**, 14-bit, default 50 Hz (`servo_hz`) | Steering servo; separate 5–6 V supply, common GND |
-| **CH2** aux PWM | **24** | *(header TBD)* | LEDC timer **2**, channel **0** | Driven from RC `aux` (‑1..1 → `servo_*_us`) |
-| **CH3** aux PWM | **26** | *(header TBD)* | LEDC timer **2**, channel **1** | Driven from param `ch3` or disarmed `servo_us ch3` |
+| **CH2** aux PWM | **2** | **21** | LEDC timer **2**, channel **0** | RC `aux` (‑1..1 → `servo_*_us`); `ch2_failsafe` without live RC |
+| **CH3** aux PWM | **26** | **31** | LEDC timer **2**, channel **1** | RC `aux2`; `ch3_failsafe` without live RC |
 | BTS RPWM | **4** | **18** | LEDC timer **3**, channel **5**, 10-bit, default 20 kHz (`bts_pwm_hz`) | Forward bridge PWM |
 | BTS LPWM | **5** | **16** | LEDC timer **3**, channel **6** | Reverse / brake low-side PWM |
 | BTS EN (R_EN + L_EN tied) | **6** | **15** | LEDC timer **3**, channel **7** | **10 kΩ pulldown to GND** on the module so a P4 reset **coasts** the motor. Deadman GPTimer forces EN low if the 250 Hz control loop stalls 50 ms |
@@ -27,7 +27,7 @@ avoid when adding hardware.
 
 | Signal | ESP32-P4 GPIO | 40-pin header | Driver | Notes |
 |--------|---------------|---------------|--------|-------|
-| VBUS sense | **9** | **8** | ADC1 (`vbus_sense`) | High side of divider to **VBUS+** (pack / BEC), low side to GPIO **9**. Scale with `vbus_div` (default **12**: e.g. 110 kΩ top, 10 kΩ bottom for a 12 V bus). Use **≥100 kΩ** total divider current for a 2S–4S pack. Shares the ADC1 unit with BTS **R_IS/L_IS** when `bts_enabled` is on |
+| VBUS sense | **53** | **35** | ADC2 channel 4 | Divider from **VBUS+** (pack / BEC): top resistor to VBUS+, tap to GPIO **53**, bottom resistor to GND. Scale with `vbus_div` (default **12**, e.g. 110 kΩ / 10 kΩ; the pin must stay under ~3.1 V). GPIO53 is also the board's speaker-amp **PA_CTRL** (0R R73 into a 74LVC1G08 input): high-Z, so the reading is fine, but the amp may sit enabled (silent) |
 
 Firmware reads VBUS every control cycle and prints `vbus_v` on the periodic `ROVER_SAMPLE` status line and in `status` on UDP 5120. Calibrate `vbus_div` against a meter (`set vbus_div <ratio>` then `save`).
 
@@ -70,10 +70,14 @@ uses the existing handle (`config::pin::i2c_port`).
 | 14–17 | (SDIO D0–D3) | C6 radio SDIO data |
 | 18, 19 | — | C6 SDIO **CLK / CMD** (not the same as header pins 18/19) |
 | 20 | **13** | krono clock-sync pulse (open drain, active low) |
-| 22 | — | Status LED (1 s period, 100 ms on) |
+| 22 | 12 | Status LED (1 s period, 100 ms on) |
 | 37, 38 | USB-UART path | P4 UART0 console |
 | 46, 48 | C6 UART bridge | Recovery / SDIO co-processor (reserved in normal app) |
 | 47 | C6 boot strap control | SDIO proxy `boot_gpio` |
+| 0, 1 | 23, 22 | 32.768 kHz crystal (0R R29 / R33) |
+| 24, 25 | 27, 28 | USB1.1 Type-C = USB-Serial-JTAG (also on the header through 0R R105 / R106) |
+| 32, 33 | 26, 29 | C6 UART (flash bridge wiring) |
+| 45 | 40 | TF card power switch (Q1 gate) |
 | 51 | — | Ethernet PHY reset (IP101) |
 | 54 | C6 `CHIP_PU` | SDIO proxy default |
 

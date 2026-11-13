@@ -177,12 +177,12 @@ Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
 |--------|------|------------|-------|
 | I2C SDA / SCL | 7 / 8 | 3 / 5 | The board I2C (`ESP_I2C_SDA` / `_SCL`), shared with the camera SCCB (0x36) and the ES8311 (0x18); 2.2 k pull-ups on the board. GY-521 at 0x68, GY-271 at 0x0d (QMC) or 0x1e (HMC) |
 | CH1 steering PWM | 3 | 19 | Separate 5–6 V supply, common ground |
-| CH2 aux PWM | 24 | — | RC `aux` stick |
-| CH3 aux PWM | 26 | — | `set ch3` (‑1..1) or bench `servo_us ch3` |
+| CH2 aux PWM | 2 | 21 | RC `aux`; `ch2_failsafe` without live RC |
+| CH3 aux PWM | 26 | 31 | RC `aux2`; `ch3_failsafe` without live RC |
 | BTS7960 RPWM / LPWM | 4 / 5 | 18 / 16 | 20 kHz |
 | BTS7960 R_EN + L_EN | 6 | 15 | Tied together; 10 k pull-down to GND so a P4 reset coasts |
 | BTS7960 R_IS / L_IS | 21 / 23 | 11 / 7 | ADC1, through a divider (IS reaches ~5 V); ratio in `is_div` |
-| VBUS sense | 9 | 8 | ADC1 divider to pack/BEC; ratio in `vbus_div` (default 12) |
+| VBUS sense | 53 | 35 | ADC2, divider from the pack / BEC; ratio in `vbus_div` (default 12). Also the board's speaker-amp PA_CTRL (high-Z gate input) |
 | 3V3 / 5V / GND | | 1, 17 / 2, 4 / 6, 9, 14, 20, 25, 30, 34, 39 | |
 
 `main/main.cpp` creates the board I2C bus before video starts; the camera source uses that bus rather than creating its own. The BTS7960 stays unconfigured (pins untouched) until `set bts_enabled 1`. Mount the GY-521 flat with its x arrow forward and the GY-271 in the same orientation: the body frame is x forward, y left, z up, and a right turn is a positive yaw rate (`imu_yaw_sign` flips it).
@@ -201,7 +201,7 @@ MSP v2, one frame per datagram: `'$' 'X' dir flag:u8 func:u16 len:u16 payload cr
 
 | func | dir | Rate | Payload |
 |------|-----|------|---------|
-| 0x4201 RC | < | 50 Hz | `seq:u16 t_us:u32 src:u8 flags:u8 mode:u8 steer:i16 thr:i16 aux:i16` (15 B). steer / thr -1000..1000 (+ = right / forward); flags bit 0 = arm; mode 255 = rover default; src 1 phone, 2 UDP, 3 console; t_us = sender `CLOCK_REALTIME` µs, low 32 bits |
+| 0x4201 RC | < | 50 Hz | `seq:u16 t_us:u32 src:u8 flags:u8 mode:u8 steer:i16 thr:i16 aux:i16 aux2:i16` (17 B; the older 15 B frame without `aux2` is still accepted, aux2 = 0). steer / thr / aux / aux2 -1000..1000 (+ = right / forward), aux = CH2, aux2 = CH3; flags bit 0 = arm; mode 255 = rover default; src 1 phone, 2 UDP, 3 console; t_us = sender `CLOCK_REALTIME` µs, low 32 bits |
 | 0x4220 TELEM | > | `telem_hz` (20) | `seq:u16 t_us:u32 rc_seq:u16 rc_age_ms:u16 state:u8 mode:u8 r_cmd:i16 r_meas:i16 steer_out:i16 thr_out:i16 heading:u16 roll:i16 pitch:i16 ax:i16 ay:i16 v_est:u16 i_motor:u16 rc_loss:u16 rc_lat_ms:u16 flags:u8` (39 B). Rates 0.1 dps, outputs ‰, angles 0.01°, accel mg, v cm/s, current 10 mA, loss ‰ and latency p50 over the last second. state 0 disarmed, 1 armed, 2 failsafe, 3 fault; flags: 0x01 imu ok, 0x02 mag ok, 0x04 gyro calibrated, 0x08 BTS enabled, 0x10 deadman, 0x20 IMU lost (direct), 0x40 braking |
 | 0x4210 GET_PARAM | < / > | | `id:u8` → `id:u8 value:f32` |
 | 0x4211 SET_PARAM | < / > | | `id:u8 value:f32` → the applied (clamped) value |
@@ -233,7 +233,7 @@ Parameters (`list` prints them; defaults are placeholders until the car is measu
 | Geometry | `steer_max_deg` 30 (wheel angle at full throw), `wheelbase_m` 0.26 |
 | Steering | `mode` 1, `rate_max_dps` 360, `a_lat_max` 8, `expo` 0.3, `kp` 0.004, `ki` 0.02, `kff` 1, `blend_v0` 0.5, `blend_v1` 1.5, `hold_kp` 2, `gyro_lpf_hz` 42, `imu_yaw_sign` -1 |
 | Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000, `vbus_div` 12 |
-| Link | `failsafe_ms` 300, `telem_hz` 20, `ch3` 0 (CH3 normalized command) |
+| Link | `failsafe_ms` 300, `telem_hz` 20, `ch2_failsafe` / `ch3_failsafe` 0 (-1..1: CH2 / CH3 position without live RC, in failsafe or fault) |
 | Compass | `mag_off_x` / `_y` / `_z` (from `mag_cal`) |
 
 ```bash

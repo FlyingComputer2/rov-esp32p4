@@ -34,8 +34,8 @@ struct pins
     int bts_en = 6;
     int bts_r_is = 21;
     int bts_l_is = 23;
-    /** VBUS sense ADC GPIO; -1 disables. */
-    int vbus_adc = 9;
+    /** VBUS sense ADC GPIO (any ADC unit); -1 disables. */
+    int vbus_adc = -1;
 };
 
 struct config

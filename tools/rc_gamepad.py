@@ -118,6 +118,8 @@ def main():
     p.add_argument('--steer', type=float, default=0.0)
     p.add_argument('--thr', type=float, default=0.0)
     p.add_argument('--arm', action='store_true')
+    p.add_argument('--aux', type=float, default=0.0, help='CH2 servo, -1..1')
+    p.add_argument('--aux2', type=float, default=0.0, help='CH3 servo, -1..1')
     p.add_argument('--seconds', type=float, default=0, help='stop after this long (0 = until Ctrl-C)')
     p.add_argument('--no-pad', action='store_true')
     a = p.parse_args()
@@ -143,8 +145,10 @@ def main():
                 steer, thr, arm = a.steer, a.thr, a.arm
             steer = max(-1.0, min(1.0, steer))
             thr = max(-1.0, min(1.0, thr))
-            payload = struct.pack('<HIBBBhhh', seq & 0xFFFF, realtime_us32(), SRC_UDP, 1 if arm else 0,
-                                  a.mode, round(steer * 1000), round(thr * 1000), 0)
+            aux = round(max(-1.0, min(1.0, a.aux)) * 1000)
+            aux2 = round(max(-1.0, min(1.0, a.aux2)) * 1000)
+            payload = struct.pack('<HIBBBhhhh', seq & 0xFFFF, realtime_us32(), SRC_UDP, 1 if arm else 0,
+                                  a.mode, round(steer * 1000), round(thr * 1000), aux, aux2)
             sock.sendto(msp_encode(b'<', FUNC_RC, payload), dest)
             seq += 1
         try:

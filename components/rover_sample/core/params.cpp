@@ -51,7 +51,8 @@ const param_info k_params[] = {
     {p_mag_off_x, "mag_off_x", 0, -10, 10, 0, "gauss"},
     {p_mag_off_y, "mag_off_y", 0, -10, 10, 0, "gauss"},
     {p_mag_off_z, "mag_off_z", 0, -10, 10, 0, "gauss"},
-    {p_ch3, "ch3", 0, -1, 1, 0, "CH3 -1..1"},
+    {p_ch2_failsafe, "ch2_failsafe", 0, -1, 1, 0, "-1..1"},
+    {p_ch3_failsafe, "ch3_failsafe", 0, -1, 1, 0, "-1..1"},
 };
 
 }  // namespace

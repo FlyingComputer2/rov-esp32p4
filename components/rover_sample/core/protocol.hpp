@@ -53,9 +53,12 @@ struct rc_frame
     uint8_t mode = k_rc_mode_none;
     int16_t steer = 0;  // -1000..1000, + = right
     int16_t thr = 0;    // -1000..1000, + = forward
-    int16_t aux = 0;
+    int16_t aux = 0;   // -1000..1000, CH2
+    int16_t aux2 = 0;  // -1000..1000, CH3; absent (0) in a 15 B frame
 };
-constexpr size_t k_rc_bytes = 15;
+// pack() writes the 17 B frame; unpack_rc() also takes the older 15 B one.
+constexpr size_t k_rc_bytes = 17;
+constexpr size_t k_rc_bytes_v1 = 15;
 
 enum class state : uint8_t
 {

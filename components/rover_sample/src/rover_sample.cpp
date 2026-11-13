@@ -190,7 +190,7 @@ class app
     magnetometer mag_;
     servo servo_[3];
     bts7960 bts_;
-    vbus_sense vbus_;
+    adc_input vbus_;  // through the vbus_div divider
     deadman deadman_;
 
     // Guarded by mu_.
@@ -305,9 +305,9 @@ void app::control_task()
             servo_[ch].set_us(servo_center);
         }
     }
-    if (cfg_.pin.vbus_adc >= 0)
+    if (cfg_.pin.vbus_adc >= 0 && !vbus_.init(cfg_.pin.vbus_adc))
     {
-        vbus_.init(cfg_.pin.vbus_adc);
+        printf("rover_sample: VBUS sense on GPIO%d failed, vbus_v reads 0\n", cfg_.pin.vbus_adc);
     }
     int applied_servo_hz = static_cast<int>(p.get(p_servo_hz));
     int applied_lpf = static_cast<int>(p.get(p_gyro_lpf_hz));
@@ -344,11 +344,10 @@ void app::control_task()
         control_input in;
         float override_us[3];
         float aux_norm = 0;
-        float ch3_norm = 0;
+        float aux2_norm = 0;
         {
             std::lock_guard<std::mutex> lock(mu_);
             p = p_;
-            ch3_norm = p.get(p_ch3);
             if (req_gyro_cal_)
             {
                 req_gyro_cal_ = false;
@@ -377,6 +376,7 @@ void app::control_task()
             in.arm = rc.flags & k_rc_flag_arm;
             in.mode_req = rc.mode;
             aux_norm = rc.aux / 1000.f;
+            aux2_norm = rc.aux2 / 1000.f;
             for (int ch = 0; ch < 3; ++ch)
             {
                 override_us[ch] = servo_override_us_[ch];
@@ -408,7 +408,7 @@ void app::control_task()
             bts_.deinit();
             bts_on = want_bts &&
                      bts_.init(cfg_.pin.bts_rpwm, cfg_.pin.bts_lpwm, cfg_.pin.bts_en, cfg_.pin.bts_r_is,
-                               cfg_.pin.bts_l_is, want_bts_hz, vbus_.unit(), vbus_.cali());
+                               cfg_.pin.bts_l_is, want_bts_hz);
             applied_bts_hz = want_bts_hz;
             deadman_.set_en_gpio(bts_on ? cfg_.pin.bts_en : -1);
             printf("rover_sample: BTS7960 %s\n", bts_on ? "on" : "off");
@@ -499,7 +499,7 @@ void app::control_task()
         {
             current = bts_.read_current(p.get(p_is_div), p.get(p_is_r_ohm), dt);
         }
-        const float vbus_v = vbus_.read_v(p.get(p_vbus_div));
+        const float vbus_v = vbus_.read_v() * p.get(p_vbus_div);
 
         in.imu_ok = imu_ok;
         in.gyro_cal = cal.done();
@@ -515,16 +515,17 @@ void app::control_task()
         }
         control_output out = ctl.step(in, p);
 
-        // CH1 steering; CH2 RC aux; CH3 param ch3. Disarmed may override per channel.
-        float norm[3] = {out.servo, aux_norm, ch3_norm};
+        // CH1 steering; CH2 / CH3 follow RC aux / aux2. Disarmed may override per channel.
+        float norm[3] = {out.servo, aux_norm, aux2_norm};
         if (p.get(p_servo_reverse) >= 1.f)
         {
             norm[0] = -norm[0];
         }
-        if (out.st == state::failsafe || out.st == state::fault)
+        // No live RC (also while disarmed) holds CH2 / CH3 at their failsafe positions.
+        if (out.st == state::failsafe || out.st == state::fault || !in.rc_valid)
         {
-            norm[1] = 0;
-            norm[2] = 0;
+            norm[1] = p.get(p_ch2_failsafe);
+            norm[2] = p.get(p_ch3_failsafe);
         }
         float us_ch[3] = {0, 0, 0};
         for (int ch = 0; ch < 3; ++ch)
@@ -976,7 +977,12 @@ std::string app::command(const std::string& line)
         }
         else
         {
-            us = std::strtof(which.c_str(), nullptr);
+            char* end = nullptr;
+            us = std::strtof(which.c_str(), &end);
+            if (end == which.c_str() || *end != '\0')
+            {
+                return "error servo_us [ch1|ch2|ch3] <us>|0\n";
+            }
         }
         std::lock_guard<std::mutex> lock(mu_);
         if (st_.out.st != state::disarmed)

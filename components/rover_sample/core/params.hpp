@@ -49,8 +49,9 @@ enum param_id : uint8_t
     p_mag_off_x = 50,
     p_mag_off_y = 51,
     p_mag_off_z = 52,
-    p_ch3 = 53,  // CH3 normalized command -1..1 when no RC aux2
-    p_id_end = 54,
+    p_ch2_failsafe = 53,  // CH2 position in failsafe / fault, -1..1
+    p_ch3_failsafe = 54,  // CH3 position in failsafe / fault, -1..1
+    p_id_end = 55,
 };
 
 enum : uint8_t

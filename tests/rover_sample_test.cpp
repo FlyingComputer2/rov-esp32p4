@@ -70,11 +70,20 @@ void test_protocol()
     rc.steer = -1000;
     rc.thr = 999;
     rc.aux = -5;
+    rc.aux2 = 700;
     auto p = pack(rc);
     CHECK(p.size() == k_rc_bytes);
     auto back = unpack_rc(p);
     CHECK(back && back->seq == 65535 && back->t_us == 0xdeadbeef && back->steer == -1000 &&
-          back->thr == 999 && back->aux == -5 && back->mode == 1);
+          back->thr == 999 && back->aux == -5 && back->aux2 == 700 && back->mode == 1);
+    // The older 15 B frame (no aux2) still decodes, with aux2 = 0.
+    std::vector<uint8_t> v1(p.begin(), p.begin() + k_rc_bytes_v1);
+    auto back_v1 = unpack_rc(v1);
+    CHECK(back_v1 && back_v1->aux == -5 && back_v1->aux2 == 0);
+    CHECK(!unpack_rc(std::vector<uint8_t>(p.begin(), p.begin() + 16)));
+    rc.aux2 = 1001;
+    CHECK(!unpack_rc(pack(rc)));
+    rc.aux2 = 0;
     rc.thr = 1001;
     CHECK(!unpack_rc(pack(rc)));
 

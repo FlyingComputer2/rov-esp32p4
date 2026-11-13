@@ -2,7 +2,9 @@
 // Documented in docs/board-pins.md (wiring, LEDC timers, reserved pins).
 // Servos CH1–CH3 use LEDC timer 2 (ch 4/0/1); BTS7960 uses timer 3 / ch 5–7 — see
 // rover_sample/src/drivers.cpp. Actuator GPIOs avoid SDIO (14–19), krono 20,
-// LED 22, C6 control (46–48, 47, 54), and board I2C 7/8.
+// LED 22, C6 control (46–48, 47, 54), board I2C 7/8, the USB1.1 Type-C
+// USB-Serial-JTAG (24/25), the 32 kHz crystal (0/1), the C6 UART (32/33) and
+// the TF power switch (45). Header pin numbers as in the README (pin 1 = 3V3).
 #pragma once
 
 #include <cstdint>
@@ -15,8 +17,8 @@ namespace rover_board
 
 // --- Servos CH1–CH3 (SG90-class, separate 5–6 V supply, common GND) ---
 constexpr gpio_num_t k_servo_ch1_pwm = GPIO_NUM_3;   // CH1 steering, header pin 19
-constexpr gpio_num_t k_servo_ch2_pwm = GPIO_NUM_24;  // CH2 (RC aux)
-constexpr gpio_num_t k_servo_ch3_pwm = GPIO_NUM_26;  // CH3 (param ch3)
+constexpr gpio_num_t k_servo_ch2_pwm = GPIO_NUM_2;   // CH2 (RC aux), header pin 21
+constexpr gpio_num_t k_servo_ch3_pwm = GPIO_NUM_26;  // CH3 (RC aux2), header pin 31
 
 // --- BTS7960 / IBT-2 motor bridge (20 kHz PWM; EN tied R_EN+L_EN) ---
 constexpr gpio_num_t k_bts_rpwm = GPIO_NUM_4;   // header pin 18
@@ -25,8 +27,12 @@ constexpr gpio_num_t k_bts_en = GPIO_NUM_6;     // header pin 15 (10k pulldown)
 constexpr gpio_num_t k_bts_r_is = GPIO_NUM_21;  // header pin 11, ADC1
 constexpr gpio_num_t k_bts_l_is = GPIO_NUM_23;  // header pin 7, ADC1
 
-// --- VBUS / battery divider (ADC1, high side of divider to VBUS, low to ADC) ---
-constexpr gpio_num_t k_vbus_sense = GPIO_NUM_9;  // header pin 8, ADC1
+// --- VBUS / battery divider (high side to VBUS, tap to the pin, low side to GND) ---
+// GPIO53 = ADC2 ch4, header pin 35. On this board it is also PA_CTRL (0R R73 into
+// the speaker amp's 74LVC1G08 enable gate): a high-Z input, so the reading is
+// fine, but the amp may sit enabled (silent) while the bus is up. The only other
+// ADC pins on the header are 20 (krono), 21/23 (BTS IS) and 22 (LED).
+constexpr gpio_num_t k_vbus_sense = GPIO_NUM_53;
 
 /** Actuator pins passed into rover_sample (I2C port filled by main). */
 inline rover_sample::pins actuator_pins()
