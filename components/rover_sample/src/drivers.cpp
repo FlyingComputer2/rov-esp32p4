@@ -426,7 +426,10 @@ void bts7960::deinit()
 void bts7960::duty(int i, float d)
 {
     d = std::fmin(std::fmax(d, 0.f), 1.f);
-    ledc_set_duty(k_mode, k_bts_ch[i], static_cast<uint32_t>(d * ((1u << k_bts_bits) - 1) + 0.5f));
+    // LEDC duty runs 0..2^bits; 2^bits is steady high (2^bits - 1 leaves a 1-tick low pulse
+    // every period, which an EN line held "high" must not have).
+    const uint32_t full = 1u << k_bts_bits;
+    ledc_set_duty(k_mode, k_bts_ch[i], d >= 1.f ? full : static_cast<uint32_t>(d * full + 0.5f));
     ledc_update_duty(k_mode, k_bts_ch[i]);
 }
 
