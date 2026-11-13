@@ -243,6 +243,9 @@ void controller::throttle(const control_input& in, const params& p, control_outp
     const float max_fwd = p.get(p_thr_max_fwd) / 100.f;
     const float max_rev = p.get(p_thr_max_rev) / 100.f;
     const bool rev_direct = p.get(p_rev_mode) >= 1.f;
+    // Stick just past the deadband starts at thr_min (static friction), full stick is the max.
+    const float lo = p.get(p_thr_min) / 100.f;
+    auto span = [lo](float mag, float max) { return mag <= 0 ? 0.f : std::fmin(lo, max) + (max - std::fmin(lo, max)) * mag; };
 
     motor_cmd cmd = motor_cmd::drive;
     float target = 0;
@@ -250,18 +253,18 @@ void controller::throttle(const control_input& in, const params& p, control_outp
     if (t > 0)
     {
         seen_brake_ = rev_ready_ = reversing_ = false;
-        target = t * max_fwd;
+        target = span(t, max_fwd);
     }
     else if (t < 0)
     {
         if (rev_direct || reversing_)
         {
-            target = t * max_rev;
+            target = -span(-t, max_rev);
         }
         else if (rev_ready_ && v_ < k_rev_lock_mps)
         {
             reversing_ = true;
-            target = t * max_rev;
+            target = -span(-t, max_rev);
         }
         else
         {

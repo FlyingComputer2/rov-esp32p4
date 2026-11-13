@@ -7,6 +7,7 @@
 
 #include "driver/gptimer.h"
 #include "driver/i2c_master.h"
+#include "driver/ledc.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_oneshot.h"
 
@@ -59,30 +60,57 @@ class magnetometer
     bool qmc_ = false;
 };
 
-// Steering servo on LEDC timer 2 / channel 4.
+// RC servo PWM on LEDC timer 2 (channels 0–3 and 4; CH1 steering uses ch 4).
 class servo
 {
    public:
-    bool init(int gpio, int hz);
+    // ledc_ch: LEDC_CHANNEL_0..7; gpio < 0 skips output (channel disabled).
+    bool init(int gpio, int hz, int ledc_ch);
     bool set_hz(int hz);
     void set_us(float us);
     float us() const
     {
         return us_;
     }
+    bool ok() const
+    {
+        return ok_;
+    }
 
    private:
     int hz_ = 50;
     float us_ = 0;
+    ledc_channel_t ch_ = LEDC_CHANNEL_4;
+    bool ok_ = false;
+};
+
+// One ADC input (any unit), 12 dB attenuation, curve-fitting calibration when
+// available. Units are shared between inputs and never released.
+class adc_input
+{
+   public:
+    bool init(int gpio);
+    // Volts at the pin; 0 when not initialised or the read fails.
+    float read_v() const;
+    bool ok() const
+    {
+        return ok_;
+    }
+
+   private:
+    adc_oneshot_unit_handle_t adc_ = nullptr;
+    adc_cali_handle_t cali_ = nullptr;
+    adc_channel_t ch_ = ADC_CHANNEL_0;
     bool ok_ = false;
 };
 
 // BTS7960 (IBT-2): RPWM / LPWM / EN on LEDC timer 3 / channels 5-7, R_IS /
-// L_IS on ADC1. EN is the deadman's cut-off.
+// L_IS on ADC inputs. EN is the deadman's cut-off.
 class bts7960
 {
    public:
-    bool init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz);
+    // en drives R_EN; l_en (>= 0) gets the same LEDC signal on a second pin (L_EN).
+    bool init(int rpwm, int lpwm, int en, int l_en, int r_is, int l_is, int pwm_hz);
     void deinit();
     bool enabled() const
     {
@@ -103,15 +131,14 @@ class bts7960
     void duty(int ch, float d);
     bool ok_ = false;
     int en_ = -1;
+    int l_en_ = -1;
     int pins_[3] {-1, -1, -1};
-    adc_oneshot_unit_handle_t adc_ = nullptr;
-    adc_cali_handle_t cali_ = nullptr;
-    int ch_r_ = -1, ch_l_ = -1;
+    adc_input is_r_, is_l_;
     float overload_t_ = 0;
 };
 
 // One-shot GPTimer; kick() every control cycle. If 50 ms pass without one,
-// the ISR forces the BTS EN pin low and latches tripped().
+// the ISR forces the BTS EN pin(s) low and latches tripped().
 class deadman
 {
    public:
@@ -122,8 +149,9 @@ class deadman
         return tripped_.load();
     }
     void clear();
-    void set_en_gpio(int gpio)
+    void set_en_gpio(int gpio, int gpio2 = -1)
     {
+        en_gpio2_.store(gpio2);
         en_gpio_.store(gpio);
     }
 
@@ -131,6 +159,7 @@ class deadman
     static bool on_alarm(gptimer_handle_t, const gptimer_alarm_event_data_t*, void* arg);
     gptimer_handle_t timer_ = nullptr;
     std::atomic<int> en_gpio_ {-1};
+    std::atomic<int> en_gpio2_ {-1};
     std::atomic<bool> tripped_ {false};
 };
 

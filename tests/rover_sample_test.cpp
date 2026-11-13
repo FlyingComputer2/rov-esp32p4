@@ -70,11 +70,20 @@ void test_protocol()
     rc.steer = -1000;
     rc.thr = 999;
     rc.aux = -5;
+    rc.aux2 = 700;
     auto p = pack(rc);
     CHECK(p.size() == k_rc_bytes);
     auto back = unpack_rc(p);
     CHECK(back && back->seq == 65535 && back->t_us == 0xdeadbeef && back->steer == -1000 &&
-          back->thr == 999 && back->aux == -5 && back->mode == 1);
+          back->thr == 999 && back->aux == -5 && back->aux2 == 700 && back->mode == 1);
+    // The older 15 B frame (no aux2) still decodes, with aux2 = 0.
+    std::vector<uint8_t> v1(p.begin(), p.begin() + k_rc_bytes_v1);
+    auto back_v1 = unpack_rc(v1);
+    CHECK(back_v1 && back_v1->aux == -5 && back_v1->aux2 == 0);
+    CHECK(!unpack_rc(std::vector<uint8_t>(p.begin(), p.begin() + 16)));
+    rc.aux2 = 1001;
+    CHECK(!unpack_rc(pack(rc)));
+    rc.aux2 = 0;
     rc.thr = 1001;
     CHECK(!unpack_rc(pack(rc)));
 
@@ -83,10 +92,15 @@ void test_protocol()
     t.roll = -12345;
     t.heading = 35999;
     t.flags = 0x3f;
+    t.vbus = 1234;
+    t.rssi = -67;
     auto tp = pack(t);
     CHECK(tp.size() == k_telem_bytes);
     auto tb = unpack_telem(tp);
     CHECK(tb && tb->seq == 7 && tb->roll == -12345 && tb->heading == 35999 && tb->flags == 0x3f);
+    CHECK(tb->vbus == 1234 && tb->rssi == -67);
+    auto tv1 = unpack_telem(std::vector<uint8_t>(tp.begin(), tp.begin() + k_telem_bytes_v1));
+    CHECK(tv1 && tv1->flags == 0x3f && tv1->vbus == 0 && tv1->rssi == 0);
 
     uint8_t id;
     float v;
@@ -172,6 +186,27 @@ void test_arming_failsafe()
     CHECK(out.st == state::fault && out.motor == motor_cmd::coast);
     CHECK(c.step(rc_in(0, 0, true), p).st == state::fault);
     CHECK(c.step(rc_in(0, 0, false), p).st == state::disarmed);
+}
+
+void test_throttle_min()
+{
+    params p;
+    p.set(p_thr_min, 40);
+    p.set(p_rev_mode, 1);
+    controller c;
+    c.step(rc_in(0, 0, true), p);
+    // Just past the deadband: thr_min; full stick: thr_max_fwd; between: linear.
+    auto out = run(c, p, rc_in(0, 0.031f, true), 2.0f);
+    CHECK_NEAR(out.duty, 0.4f, 2e-3f);
+    out = run(c, p, rc_in(0, 1, true), 2.0f);
+    CHECK_NEAR(out.duty, 0.6f, 1e-3f);
+    out = run(c, p, rc_in(0, 0.515f, true), 2.0f);
+    CHECK_NEAR(out.duty, 0.5f, 2e-3f);
+    // Reverse the same, capped at thr_max_rev; inside the deadband nothing.
+    out = run(c, p, rc_in(0, -1, true), 2.0f);
+    CHECK_NEAR(out.duty, -0.4f, 1e-3f);
+    out = run(c, p, rc_in(0, 0.02f, true), 0.5f);
+    CHECK(out.motor == motor_cmd::coast);
 }
 
 void test_throttle_esc()
@@ -373,6 +408,7 @@ int main()
     test_params();
     test_arming_failsafe();
     test_throttle_esc();
+    test_throttle_min();
     test_rate_loop();
     test_rc_link();
     test_gyro_cal_and_ahrs();

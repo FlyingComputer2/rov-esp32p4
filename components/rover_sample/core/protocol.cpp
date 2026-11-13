@@ -64,12 +64,13 @@ std::vector<uint8_t> pack(const rc_frame& rc)
     w.u16(static_cast<uint16_t>(rc.steer));
     w.u16(static_cast<uint16_t>(rc.thr));
     w.u16(static_cast<uint16_t>(rc.aux));
+    w.u16(static_cast<uint16_t>(rc.aux2));
     return w.out;
 }
 
 std::optional<rc_frame> unpack_rc(const std::vector<uint8_t>& payload)
 {
-    if (payload.size() != k_rc_bytes)
+    if (payload.size() != k_rc_bytes && payload.size() != k_rc_bytes_v1)
     {
         return std::nullopt;
     }
@@ -83,7 +84,12 @@ std::optional<rc_frame> unpack_rc(const std::vector<uint8_t>& payload)
     rc.steer = r.i16();
     rc.thr = r.i16();
     rc.aux = r.i16();
-    if (rc.steer < -1000 || rc.steer > 1000 || rc.thr < -1000 || rc.thr > 1000)
+    if (payload.size() == k_rc_bytes)
+    {
+        rc.aux2 = r.i16();
+    }
+    auto bad = [](int16_t v) { return v < -1000 || v > 1000; };
+    if (bad(rc.steer) || bad(rc.thr) || bad(rc.aux) || bad(rc.aux2))
     {
         return std::nullopt;
     }
@@ -113,12 +119,14 @@ std::vector<uint8_t> pack(const telem_frame& t)
     w.u16(t.rc_loss);
     w.u16(t.rc_lat_ms);
     w.u8(t.flags);
+    w.u16(t.vbus);
+    w.u8(static_cast<uint8_t>(t.rssi));
     return w.out;
 }
 
 std::optional<telem_frame> unpack_telem(const std::vector<uint8_t>& payload)
 {
-    if (payload.size() != k_telem_bytes)
+    if (payload.size() != k_telem_bytes && payload.size() != k_telem_bytes_v1)
     {
         return std::nullopt;
     }
@@ -144,6 +152,11 @@ std::optional<telem_frame> unpack_telem(const std::vector<uint8_t>& payload)
     t.rc_loss = r.u16();
     t.rc_lat_ms = r.u16();
     t.flags = r.u8();
+    if (payload.size() == k_telem_bytes)
+    {
+        t.vbus = r.u16();
+        t.rssi = static_cast<int8_t>(r.u8());
+    }
     return t;
 }
 

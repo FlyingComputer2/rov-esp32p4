@@ -63,6 +63,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "board_pins.hpp"
 #include "rover_sample/rover_sample.hpp"
 #include "sys_applet/applet.hpp"
 #include "vstreamer_idf/live_tx.hpp"
@@ -364,6 +365,42 @@ void run_apps_reactor()
 /* Configures and starts the applets on the app reactor and their named
  * upstream queues, before winject-l3 starts (it binds the same queues). They
  * live for the program. */
+// rover_sample, for the radio RSSI poll (set before winject-l3 starts).
+std::atomic<rover_sample::Applet*> g_car {nullptr};
+
+/* RSSI of the ground's frames at our C6 (radio_info `radio_rx rssi`), for
+ * rover_sample's telemetry (CRSF uplink RSSI on the phone). Polls at 2 Hz
+ * with the blocking form, so it runs on a thread of its own, never on l3's. */
+void start_rssi_poll(const winject::L3& l3)
+{
+    // Called on l3's thread: keep its pthread config for the threads it starts.
+    scoped_pthread_cfg scoped(psram_thread_cfg("rssi_poll", 4 * 1024, 3));
+    std::thread(
+        [l3]
+        {
+            while (l3.running())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                rover_sample::Applet* car = g_car.load();
+                if (!car)
+                {
+                    continue;
+                }
+                auto radio = l3.radios().get();
+                if (!radio.ok())
+                {
+                    continue;
+                }
+                const auto info = radio.value.info(std::chrono::milliseconds(300));
+                if (info.ok() && info.value.rssi)
+                {
+                    car->set_link_rssi(*info.value.rssi);
+                }
+            }
+        })
+        .detach();
+}
+
 void start_applets()
 {
     static applets::BwtestApplet bwtest;
@@ -412,11 +449,13 @@ void start_applets()
      * cycle) is its own; its RC link and console (UDP 5120) are on the app
      * reactor. Needs the board I2C bus. */
     static rover_sample::Applet car;
+    g_car = &car;
     rover_sample::config rs;
     rs.reactor = k_apps_reactor;
     rs.link_to_l3 = k_rc_up.names.to_l3;
     rs.link_from_l3 = k_rc_up.names.from_l3;
     rs.console = k_rover_sample_console;
+    rs.pin = rover_board::actuator_pins();
     rs.pin.i2c_port = k_board_i2c_port;
     if (!car.configure(rs) || !car.start())
     {
@@ -467,6 +506,7 @@ void* run_l3(void*)
     winject::l3::console::Service console;
     auto started = [&](const winject::L3& l3)
     {
+        start_rssi_poll(l3);
         if (!cfg.console_in.empty())
         {
             const winject::Status s =
@@ -665,6 +705,8 @@ extern "C" void IRAM_ATTR __wrap_esp_restart_noos(void)
 
 extern "C" void app_main(void)
 {
+    // Motor bridge off before anything else (see board_pins.hpp).
+    rover_board::hold_bts_off();
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {

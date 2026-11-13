@@ -48,6 +48,34 @@ constexpr int k_loop_ms = 4;  // 250 Hz
 constexpr int k_mag_every = 5;  // 50 Hz
 constexpr int k_probe_every = 500;  // retry a missing sensor every 2 s
 constexpr int k_imu_fail_limit = 10;
+constexpr int k_servo_ledc_ch[3] = {4, 0, 1};  // CH1 steering, CH2, CH3
+
+// Aux servos (CH2, CH3): plain 1000..2000 us, not the steering trims.
+float aux_to_us(float s)
+{
+    return 1500.f + 500.f * std::fmax(-1.f, std::fmin(1.f, s));
+}
+
+float norm_to_us(float s, const params& p)
+{
+    const float c = p.get(p_servo_center_us);
+    return s >= 0 ? c + s * (p.get(p_servo_max_us) - c) : c + s * (c - p.get(p_servo_min_us));
+}
+
+int servo_pin(const pins& pin, int ch)
+{
+    switch (ch)
+    {
+        case 0:
+            return pin.servo;
+        case 1:
+            return pin.servo_ch2;
+        case 2:
+            return pin.servo_ch3;
+        default:
+            return -1;
+    }
+}
 constexpr const char* k_nvs_ns = "rover_sample";
 constexpr const char* k_nvs_key = "params";
 
@@ -116,10 +144,13 @@ struct status
     float a[3] {};
     float roll = 0, pitch = 0, heading = 0;
     float current = 0;
+    float vbus_v = 0;
     bool imu_present = false, imu_ok = false, mag_present = false, mag_ok = false;
     bool gyro_cal = false, bts_on = false, deadman = false, bts_fault = false;
     const char* mag_kind = "none";
     float servo_us = 0;
+    float servo_ch2_us = 0;
+    float servo_ch3_us = 0;
     uint32_t i2c_errors = 0;
     uint32_t overruns = 0;
     float loop_max_ms = 0;
@@ -131,6 +162,11 @@ class app
 {
    public:
     explicit app(const config& cfg) : cfg_(cfg) {}
+    void set_link_rssi(int dbm)
+    {
+        link_rssi_.store(dbm, std::memory_order_relaxed);
+        link_rssi_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+    }
     bool configure();
     bool start();
     // Reactor thread: drain RC, send telemetry when due; one console line.
@@ -161,10 +197,13 @@ class app
     void arm_tick();
     void console_readable(int fd);
     bool configured_ = false;
+    std::atomic<int> link_rssi_ {0};
+    std::atomic<int64_t> link_rssi_us_ {INT64_MIN / 2};
     mpu6050 imu_;
     magnetometer mag_;
-    servo servo_;
+    servo servo_[3];
     bts7960 bts_;
+    adc_input vbus_;  // through the vbus_div divider
     deadman deadman_;
 
     // Guarded by mu_.
@@ -174,7 +213,7 @@ class app
     status st_;
     bool req_gyro_cal_ = true;
     int req_mag_cal_ = 0;  // 1 start, 2 stop
-    float servo_override_us_ = 0;
+    float servo_override_us_[3] {};
     rc_frame console_rc_;
     int64_t console_rc_until_us_ = 0;
     uint16_t console_seq_ = 0;
@@ -268,8 +307,21 @@ void app::control_task()
     imu_.probe_and_init(bus_, static_cast<int>(p.get(p_gyro_lpf_hz)));
     mag_.probe_and_init(bus_);
     printf("rover_sample: imu %s, mag %s\n", imu_.present() ? "mpu6050" : "none", mag_.kind());
-    servo_.init(cfg_.pin.servo, static_cast<int>(p.get(p_servo_hz)));
-    servo_.set_us(p.get(p_servo_center_us));
+    const int servo_hz = static_cast<int>(p.get(p_servo_hz));
+    const float servo_center = p.get(p_servo_center_us);
+    for (int ch = 0; ch < 3; ++ch)
+    {
+        const int gpio = servo_pin(cfg_.pin, ch);
+        if (gpio >= 0)
+        {
+            servo_[ch].init(gpio, servo_hz, k_servo_ledc_ch[ch]);
+            servo_[ch].set_us(servo_center);
+        }
+    }
+    if (cfg_.pin.vbus_adc >= 0 && !vbus_.init(cfg_.pin.vbus_adc))
+    {
+        printf("rover_sample: VBUS sense on GPIO%d failed, vbus_v reads 0\n", cfg_.pin.vbus_adc);
+    }
     int applied_servo_hz = static_cast<int>(p.get(p_servo_hz));
     int applied_lpf = static_cast<int>(p.get(p_gyro_lpf_hz));
     bool bts_on = false;
@@ -286,6 +338,7 @@ void app::control_task()
     bool mag_cal = false, mag_ok = false;
     int64_t prev = esp_timer_get_time();
     uint32_t n = 0;
+    float vbus_v = 0;  // updated at 50 Hz, kept between reads
     TickType_t wake = xTaskGetTickCount();
 
     for (;;)
@@ -303,7 +356,9 @@ void app::control_task()
 
         // Snapshot of everything other threads write.
         control_input in;
-        float override_us;
+        float override_us[3];
+        float aux_norm = 0;
+        float aux2_norm = 0;
         {
             std::lock_guard<std::mutex> lock(mu_);
             p = p_;
@@ -334,7 +389,12 @@ void app::control_task()
             in.thr = rc.thr / 1000.f;
             in.arm = rc.flags & k_rc_flag_arm;
             in.mode_req = rc.mode;
-            override_us = servo_override_us_;
+            aux_norm = rc.aux / 1000.f;
+            aux2_norm = rc.aux2 / 1000.f;
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                override_us[ch] = servo_override_us_[ch];
+            }
         }
         in.dt = dt;
 
@@ -342,7 +402,13 @@ void app::control_task()
         if (static_cast<int>(p.get(p_servo_hz)) != applied_servo_hz)
         {
             applied_servo_hz = static_cast<int>(p.get(p_servo_hz));
-            servo_.set_hz(applied_servo_hz);
+            for (auto& s : servo_)
+            {
+                if (s.ok())
+                {
+                    s.set_hz(applied_servo_hz);
+                }
+            }
         }
         if (static_cast<int>(p.get(p_gyro_lpf_hz)) != applied_lpf)
         {
@@ -354,16 +420,24 @@ void app::control_task()
         if (want_bts != bts_on || (bts_on && want_bts_hz != applied_bts_hz))
         {
             bts_.deinit();
-            bts_on = want_bts && bts_.init(cfg_.pin.bts_rpwm, cfg_.pin.bts_lpwm, cfg_.pin.bts_en,
-                                           cfg_.pin.bts_r_is, cfg_.pin.bts_l_is, want_bts_hz);
+            bts_on = want_bts &&
+                     bts_.init(cfg_.pin.bts_rpwm, cfg_.pin.bts_lpwm, cfg_.pin.bts_en, cfg_.pin.bts_l_en,
+                               cfg_.pin.bts_r_is,
+                               cfg_.pin.bts_l_is, want_bts_hz);
             applied_bts_hz = want_bts_hz;
-            deadman_.set_en_gpio(bts_on ? cfg_.pin.bts_en : -1);
+            deadman_.set_en_gpio(bts_on ? cfg_.pin.bts_en : -1, bts_on ? cfg_.pin.bts_l_en : -1);
             printf("rover_sample: BTS7960 %s\n", bts_on ? "on" : "off");
         }
 
-        // IMU.
+        // IMU (imu_enabled 0: not read at all; the controller then arms
+        // without gyro calibration and steers direct).
         float g[3] {}, a[3] {};
-        if (!imu_.present())
+        const bool imu_wanted = p.get(p_imu_enabled) >= 1.f;
+        if (!imu_wanted)
+        {
+            imu_fail = k_imu_fail_limit;
+        }
+        else if (!imu_.present())
         {
             // Init holds the loop ~100 ms (MPU reset), past the deadman, so
             // only while disarmed; the trip it causes is expected.
@@ -446,6 +520,11 @@ void app::control_task()
         {
             current = bts_.read_current(p.get(p_is_div), p.get(p_is_r_ohm), dt);
         }
+        // VBUS is for 20 Hz telemetry: read at 50 Hz, not on every 250 Hz cycle.
+        if (n % k_mag_every == 0)
+        {
+            vbus_v = vbus_.read_v() * p.get(p_vbus_div);
+        }
 
         in.imu_ok = imu_ok;
         in.gyro_cal = cal.done();
@@ -461,22 +540,38 @@ void app::control_task()
         }
         control_output out = ctl.step(in, p);
 
-        // Servo: centre (from the trim) unless driven; disarmed may override.
-        float s = out.servo;
+        // CH1 steering; CH2 / CH3 follow RC aux / aux2. Disarmed may override per channel.
+        float norm[3] = {out.servo, aux_norm, aux2_norm};
         if (p.get(p_servo_reverse) >= 1.f)
         {
-            s = -s;
+            norm[0] = -norm[0];
         }
-        const float c = p.get(p_servo_center_us);
-        float us = s >= 0 ? c + s * (p.get(p_servo_max_us) - c) : c + s * (c - p.get(p_servo_min_us));
-        if (out.st == state::disarmed && override_us > 0)
+        // No live RC (also while disarmed) holds CH2 / CH3 at their failsafe positions.
+        if (out.st == state::failsafe || out.st == state::fault || !in.rc_valid)
         {
-            us = override_us;
+            norm[1] = p.get(p_ch2_failsafe);
+            norm[2] = p.get(p_ch3_failsafe);
         }
-        servo_.set_us(us);
+        float us_ch[3] = {0, 0, 0};
+        for (int ch = 0; ch < 3; ++ch)
+        {
+            if (!servo_[ch].ok())
+            {
+                continue;
+            }
+            float us = ch == 0 ? norm_to_us(norm[ch], p) : aux_to_us(norm[ch]);
+            if (out.st == state::disarmed && override_us[ch] > 0)
+            {
+                us = override_us[ch];
+            }
+            servo_[ch].set_us(us);
+            us_ch[ch] = us;
+        }
         if (bts_on)
         {
-            bts_.apply(out.motor, out.duty);
+            // motor_reverse swaps RPWM / LPWM only; brake and telemetry keep the logical sign.
+            const bool swap = out.motor == motor_cmd::drive && p.get(p_motor_reverse) >= 1.f;
+            bts_.apply(out.motor, swap ? -out.duty : out.duty);
         }
         deadman_.kick();
 
@@ -486,7 +581,10 @@ void app::control_task()
         std::lock_guard<std::mutex> lock(mu_);
         if (out.st != state::disarmed)
         {
-            servo_override_us_ = 0;
+            for (float& o : servo_override_us_)
+            {
+                o = 0;
+            }
         }
         st_.out = out;
         for (int i = 0; i < 3; ++i)
@@ -499,6 +597,7 @@ void app::control_task()
         st_.pitch = att.pitch_deg();
         st_.heading = att.heading_deg();
         st_.current = current;
+        st_.vbus_v = vbus_v;
         st_.imu_present = imu_.present();
         st_.imu_ok = imu_ok;
         st_.mag_present = mag_.present();
@@ -508,7 +607,9 @@ void app::control_task()
         st_.bts_on = bts_on;
         st_.deadman = in.deadman;
         st_.bts_fault = in.bts_fault;
-        st_.servo_us = us;
+        st_.servo_us = us_ch[0];
+        st_.servo_ch2_us = us_ch[1];
+        st_.servo_ch3_us = us_ch[2];
         st_.i2c_errors = i2c_errors;
         st_.overruns = overruns;
         st_.loop_max_ms = loop_max_ms;
@@ -621,10 +722,15 @@ void app::send_telem()
         t.i_motor = usat16(s.current * 100);
         t.rc_loss = link_.loss_permille();
         t.rc_lat_ms = link_.latency_p50_ms();
+        t.vbus = usat16(s.vbus_v * 100);
         t.flags = (s.imu_ok ? k_telem_imu_ok : 0) | (s.mag_ok ? k_telem_mag_ok : 0) |
                   (s.gyro_cal ? k_telem_gyro_cal : 0) | (s.bts_on ? k_telem_bts_enabled : 0) |
                   (s.deadman ? k_telem_deadman : 0) | (s.out.imu_degraded ? k_telem_imu_degraded : 0) |
                   (s.out.motor == motor_cmd::brake ? k_telem_braking : 0);
+    }
+    if (now - link_rssi_us_.load(std::memory_order_relaxed) < 2000000)
+    {
+        t.rssi = static_cast<int8_t>(link_rssi_.load(std::memory_order_relaxed));
     }
     t.seq = telem_seq_++;
     t.t_us = realtime_us32();
@@ -731,7 +837,7 @@ std::string app::status_text()
     snprintf(b, sizeof(b),
              "uptime_s=%lld state=%s mode=%s%s rc_src=%u rc_age_ms=%d rc_loss=%u rc_lat_ms=%u rc_frames=%" PRIu32
              " rc_rej=%" PRIu32 " imu=%s gyro_cal=%d mag=%s%s r_cmd=%.1f r_meas=%.1f steer=%.3f"
-             " servo_us=%.0f motor=%s duty=%.3f v_est=%.2f i_a=%.2f bts=%d deadman=%d bts_fault=%d"
+             " servo_us=%.0f ch2_us=%.0f ch3_us=%.0f motor=%s duty=%.3f v_est=%.2f i_a=%.2f vbus_v=%.2f bts=%d deadman=%d bts_fault=%d"
              " heading=%.1f roll=%.1f pitch=%.1f i2c_err=%" PRIu32 " overruns=%" PRIu32 " loop_max_ms=%.2f",
              static_cast<long long>(now / 1000000), states[static_cast<int>(s.out.st)], modes[static_cast<int>(s.out.mode)],
              s.out.imu_degraded ? "(imu)" : "", link_.source(),
@@ -739,8 +845,9 @@ std::string app::status_text()
              link_.latency_p50_ms(), link_.frames(), link_.rejected(),
              s.imu_present ? (s.imu_ok ? "ok" : "err") : "none", s.gyro_cal, s.mag_kind,
              s.mag_present && !s.mag_ok ? "(no data)" : "", s.out.r_cmd, s.out.r_meas, s.out.servo,
-             s.servo_us, s.out.motor == motor_cmd::drive ? "drive" : (s.out.motor == motor_cmd::brake ? "brake" : "coast"),
-             s.out.duty, s.out.v_est, s.current, s.bts_on, s.deadman, s.bts_fault, s.heading, s.roll, s.pitch,
+             s.servo_us, s.servo_ch2_us, s.servo_ch3_us,
+             s.out.motor == motor_cmd::drive ? "drive" : (s.out.motor == motor_cmd::brake ? "brake" : "coast"),
+             s.out.duty, s.out.v_est, s.current, s.vbus_v, s.bts_on, s.deadman, s.bts_fault, s.heading, s.roll, s.pitch,
              s.i2c_errors, s.overruns, s.loop_max_ms);
     return b;
 }
@@ -885,15 +992,38 @@ std::string app::command(const std::string& line)
     }
     if (cmd == "servo_us")
     {
+        std::string which;
         float us = 0;
-        is >> us;
+        if (!(is >> which))
+        {
+            return "error servo_us [ch1|ch2|ch3] <us>|0\n";
+        }
+        int ch = 0;
+        if (which == "ch1" || which == "ch2" || which == "ch3")
+        {
+            ch = which[2] - '1';
+            if (!(is >> us))
+            {
+                return "error servo_us [ch1|ch2|ch3] <us>|0\n";
+            }
+        }
+        else
+        {
+            char* end = nullptr;
+            us = std::strtof(which.c_str(), &end);
+            if (end == which.c_str() || *end != '\0')
+            {
+                return "error servo_us [ch1|ch2|ch3] <us>|0\n";
+            }
+        }
         std::lock_guard<std::mutex> lock(mu_);
         if (st_.out.st != state::disarmed)
         {
             return "error armed\n";
         }
-        servo_override_us_ = us > 0 ? std::fmin(std::fmax(us, 500.f), 2500.f) : 0.f;
-        snprintf(b, sizeof(b), servo_override_us_ > 0 ? "servo_us=%g\n" : "servo_us off\n", servo_override_us_);
+        servo_override_us_[ch] = us > 0 ? std::fmin(std::fmax(us, 500.f), 2500.f) : 0.f;
+        snprintf(b, sizeof(b), servo_override_us_[ch] > 0 ? "servo_us ch%d=%g\n" : "servo_us ch%d off\n", ch + 1,
+                 servo_override_us_[ch]);
         return b;
     }
     return "error commands: status list get set save load defaults gyro_cal mag_cal rc servo_us\n";
@@ -992,6 +1122,14 @@ bool Applet::configure(const config& cfg)
     }
     impl_->instance = a;
     return true;
+}
+
+void Applet::set_link_rssi(int dbm)
+{
+    if (impl_->instance)
+    {
+        impl_->instance->set_link_rssi(dbm);
+    }
 }
 
 bool Applet::start()

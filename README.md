@@ -168,13 +168,22 @@ Air loss is the receiving L3's `lur` `rxgap` on upstream 2; `rx_push_drop` there
 
 ### Wiring (40-pin header)
 
+Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
+[`docs/board-pins.md`](docs/board-pins.md). Actuator constants live in
+[`main/board_pins.hpp`](main/board_pins.hpp); `main.cpp` applies
+`rover_board::actuator_pins()` before `rover_sample` starts.
+
 | Signal | GPIO | Header pin | Notes |
 |--------|------|------------|-------|
 | I2C SDA / SCL | 7 / 8 | 3 / 5 | The board I2C (`ESP_I2C_SDA` / `_SCL`), shared with the camera SCCB (0x36) and the ES8311 (0x18); 2.2 k pull-ups on the board. GY-521 at 0x68, GY-271 at 0x0d (QMC) or 0x1e (HMC) |
-| Servo PWM | 3 | 19 | Separate 5–6 V supply for the servo, common ground |
+| CH1 steering PWM | 3 | 19 | Separate 5–6 V supply, common ground |
+| CH2 aux PWM | 2 | 21 | RC `aux` → 1000–2000 µs (not the steering trims); `ch2_failsafe` without live RC |
+| CH3 aux PWM | 26 | 31 | RC `aux2` → 1000–2000 µs; `ch3_failsafe` without live RC |
 | BTS7960 RPWM / LPWM | 4 / 5 | 18 / 16 | 20 kHz |
-| BTS7960 R_EN + L_EN | 6 | 15 | Tied together; 10 k pull-down to GND so a P4 reset coasts |
-| BTS7960 R_IS / L_IS | 21 / 23 | 11 / 7 | ADC1, through a divider (IS reaches ~5 V); ratio in `is_div` |
+| BTS7960 R_EN | 6 | 15 | 10 k pull-down to GND so a P4 reset coasts |
+| BTS7960 L_EN | 21 | 11 | Separate wire, same signal as R_EN (`bts_l_en`); own 10 k pull-down. Deadman pulls both low |
+| BTS7960 R_IS / L_IS | — | — | **Not wired; disabled in `board_pins.hpp`** (current reads 0, no IS overload fault). To use: ADC1 pins through a divider (IS reaches ~5 V), ratio in `is_div` |
+| VBUS sense | 53 | 35 | ADC2, divider from the pack / BEC; ratio in `vbus_div` (default 12). Also the board's speaker-amp PA_CTRL (high-Z gate input) |
 | 3V3 / 5V / GND | | 1, 17 / 2, 4 / 6, 9, 14, 20, 25, 30, 34, 39 | |
 
 `main/main.cpp` creates the board I2C bus before video starts; the camera source uses that bus rather than creating its own. The BTS7960 stays unconfigured (pins untouched) until `set bts_enabled 1`. Mount the GY-521 flat with its x arrow forward and the GY-271 in the same orientation: the body frame is x forward, y left, z up, and a right turn is a positive yaw rate (`imu_yaw_sign` flips it).
@@ -193,8 +202,8 @@ MSP v2, one frame per datagram: `'$' 'X' dir flag:u8 func:u16 len:u16 payload cr
 
 | func | dir | Rate | Payload |
 |------|-----|------|---------|
-| 0x4201 RC | < | 50 Hz | `seq:u16 t_us:u32 src:u8 flags:u8 mode:u8 steer:i16 thr:i16 aux:i16` (15 B). steer / thr -1000..1000 (+ = right / forward); flags bit 0 = arm; mode 255 = rover default; src 1 phone, 2 UDP, 3 console; t_us = sender `CLOCK_REALTIME` µs, low 32 bits |
-| 0x4220 TELEM | > | `telem_hz` (20) | `seq:u16 t_us:u32 rc_seq:u16 rc_age_ms:u16 state:u8 mode:u8 r_cmd:i16 r_meas:i16 steer_out:i16 thr_out:i16 heading:u16 roll:i16 pitch:i16 ax:i16 ay:i16 v_est:u16 i_motor:u16 rc_loss:u16 rc_lat_ms:u16 flags:u8` (39 B). Rates 0.1 dps, outputs ‰, angles 0.01°, accel mg, v cm/s, current 10 mA, loss ‰ and latency p50 over the last second. state 0 disarmed, 1 armed, 2 failsafe, 3 fault; flags: 0x01 imu ok, 0x02 mag ok, 0x04 gyro calibrated, 0x08 BTS enabled, 0x10 deadman, 0x20 IMU lost (direct), 0x40 braking |
+| 0x4201 RC | < | 50 Hz | `seq:u16 t_us:u32 src:u8 flags:u8 mode:u8 steer:i16 thr:i16 aux:i16 aux2:i16` (17 B; the older 15 B frame without `aux2` is still accepted, aux2 = 0). steer / thr / aux / aux2 -1000..1000 (+ = right / forward), aux = CH2, aux2 = CH3; flags bit 0 = arm; mode 255 = rover default; src 1 phone, 2 UDP, 3 console; t_us = sender `CLOCK_REALTIME` µs, low 32 bits |
+| 0x4220 TELEM | > | `telem_hz` (20) | `seq:u16 t_us:u32 rc_seq:u16 rc_age_ms:u16 state:u8 mode:u8 r_cmd:i16 r_meas:i16 steer_out:i16 thr_out:i16 heading:u16 roll:i16 pitch:i16 ax:i16 ay:i16 v_est:u16 i_motor:u16 rc_loss:u16 rc_lat_ms:u16 flags:u8 vbus:u16 rssi:i8` (42 B; older rovers send the first 39 B). Rates 0.1 dps, outputs ‰, angles 0.01°, accel mg, v cm/s, current 10 mA, loss ‰ and latency p50 over the last second; vbus 10 mV (0 = no sense); rssi = dBm of the ground's frames at this C6 (`radio_info`, polled at 2 Hz by `main`; 0 = unknown). state 0 disarmed, 1 armed, 2 failsafe, 3 fault; flags: 0x01 imu ok, 0x02 mag ok, 0x04 gyro calibrated, 0x08 BTS enabled, 0x10 deadman, 0x20 IMU lost (direct), 0x40 braking |
 | 0x4210 GET_PARAM | < / > | | `id:u8` → `id:u8 value:f32` |
 | 0x4211 SET_PARAM | < / > | | `id:u8 value:f32` → the applied (clamped) value |
 | 0x4212 SAVE_PARAMS | < / > | | → `ok:u8` |
@@ -215,7 +224,7 @@ One command per datagram, reply to the sender. `set` applies from the next contr
 | `gyro_cal` | Disarmed only; keep the car still 2 s |
 | `mag_cal start` / `mag_cal stop` | Hard-iron calibration: turn the car through every heading in between; `stop` sets `mag_off_*` (then `save`) |
 | `rc <steer> <thr> <arm> [hold_ms]` | Bench RC (-1..1), repeated at 50 Hz for `hold_ms` (max 10 s) |
-| `servo_us <us>` | Disarmed only: raw servo pulse, for finding the endpoints; `servo_us 0` or arming ends it |
+| `servo_us [ch1\|ch2\|ch3] <us>` | Disarmed only: raw PWM µs per channel (`servo_us 1500` = CH1 legacy); `0` or arming clears override |
 
 Parameters (`list` prints them; defaults are placeholders until the car is measured):
 
@@ -224,9 +233,10 @@ Parameters (`list` prints them; defaults are placeholders until the car is measu
 | Servo | `servo_min_us` 1100, `servo_center_us` 1500, `servo_max_us` 1900, `servo_reverse` 0, `servo_hz` 50 (disarmed only) |
 | Geometry | `steer_max_deg` 30 (wheel angle at full throw), `wheelbase_m` 0.26 |
 | Steering | `mode` 1, `rate_max_dps` 360, `a_lat_max` 8, `expo` 0.3, `kp` 0.004, `ki` 0.02, `kff` 1, `blend_v0` 0.5, `blend_v1` 1.5, `hold_kp` 2, `gyro_lpf_hz` 42, `imu_yaw_sign` -1 |
-| Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000 |
-| Link | `failsafe_ms` 300, `telem_hz` 20 |
+| Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_min` 0 (% duty just past the deadband, static friction), `motor_reverse` 0 (1 swaps RPWM / LPWM), `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000, `vbus_div` 12 |
+| Link | `failsafe_ms` 300, `telem_hz` 20, `ch2_failsafe` / `ch3_failsafe` 0 (-1..1: CH2 / CH3 position without live RC, in failsafe or fault) |
 | Compass | `mag_off_x` / `_y` / `_z` (from `mag_cal`) |
+| IMU | `imu_enabled` 1 (disarmed only; 0 ignores the GY-521: no reads, arms without gyro calibration, steering always direct, attitude telemetry frozen) |
 
 ```bash
 echo status | nc -u -w1 192.168.253.28 5120

@@ -53,9 +53,12 @@ struct rc_frame
     uint8_t mode = k_rc_mode_none;
     int16_t steer = 0;  // -1000..1000, + = right
     int16_t thr = 0;    // -1000..1000, + = forward
-    int16_t aux = 0;
+    int16_t aux = 0;   // -1000..1000, CH2
+    int16_t aux2 = 0;  // -1000..1000, CH3; absent (0) in a 15 B frame
 };
-constexpr size_t k_rc_bytes = 15;
+// pack() writes the 17 B frame; unpack_rc() also takes the older 15 B one.
+constexpr size_t k_rc_bytes = 17;
+constexpr size_t k_rc_bytes_v1 = 15;
 
 enum class state : uint8_t
 {
@@ -98,8 +101,12 @@ struct telem_frame
     uint16_t rc_loss = 0;   // per mille, last second
     uint16_t rc_lat_ms = 0; // p50, last second
     uint8_t flags = 0;
+    uint16_t vbus = 0;  // 10 mV, 0 = no VBUS sense
+    int8_t rssi = 0;    // dBm of the ground's frames at the rover C6, 0 = unknown
 };
-constexpr size_t k_telem_bytes = 39;
+// pack() writes 42 B; unpack_telem() also takes the older 39 B frame.
+constexpr size_t k_telem_bytes = 42;
+constexpr size_t k_telem_bytes_v1 = 39;
 
 std::vector<uint8_t> pack(const rc_frame& rc);
 std::optional<rc_frame> unpack_rc(const std::vector<uint8_t>& payload);

@@ -43,12 +43,18 @@ enum param_id : uint8_t
     p_tau_v_s = 30,
     p_is_div = 31,
     p_is_r_ohm = 32,
+    p_vbus_div = 33,
     p_failsafe_ms = 40,
     p_telem_hz = 41,
     p_mag_off_x = 50,
     p_mag_off_y = 51,
     p_mag_off_z = 52,
-    p_id_end = 53,
+    p_ch2_failsafe = 53,  // CH2 position in failsafe / fault, -1..1
+    p_ch3_failsafe = 54,  // CH3 position in failsafe / fault, -1..1
+    p_imu_enabled = 55,   // 0: ignore the IMU (no reads, arm allowed, direct steering)
+    p_motor_reverse = 56, // 1: swap the BTS outputs (RPWM <-> LPWM), motor wired the other way
+    p_thr_min = 57,       // % duty just past the deadband (static friction), forward and reverse
+    p_id_end = 58,
 };
 
 enum : uint8_t

@@ -17,18 +17,26 @@
 namespace rover_sample
 {
 
-// Waveshare ESP32-P4-WIFI6-DEV-KIT 40-pin header (schematic, header P6).
+// Actuator and sensor wiring. Defaults match main/board_pins.hpp on the
+// Waveshare board; override per instance when testing on other harnesses.
 struct pins
 {
     // I2C master bus the host created before applet init (shared with the
     // camera SCCB and the codec: GPIO7 SDA, pin 3 / GPIO8 SCL, pin 5).
     int i2c_port = 0;
-    int servo = 3;      // pin 19
-    int bts_rpwm = 4;   // pin 18
-    int bts_lpwm = 5;   // pin 16
-    int bts_en = 6;     // pin 15, R_EN + L_EN, 10k pull-down to GND
-    int bts_r_is = 21;  // pin 11, ADC1, through the IS divider
-    int bts_l_is = 23;  // pin 7, ADC1, through the IS divider
+    /** CH1 steering servo PWM GPIO; -1 disables. */
+    int servo = 3;
+    /** CH2 / CH3 auxiliary servo PWM; -1 disables. */
+    int servo_ch2 = -1;
+    int servo_ch3 = -1;
+    int bts_rpwm = 4;
+    int bts_lpwm = 5;
+    int bts_en = 6;     // R_EN (and L_EN when they are tied)
+    int bts_l_en = -1;  // L_EN on its own pin, same signal as R_EN; -1 = tied to bts_en
+    int bts_r_is = 21;
+    int bts_l_is = 23;
+    /** VBUS sense ADC GPIO (any ADC unit); -1 disables. */
+    int vbus_adc = -1;
 };
 
 struct config
@@ -68,6 +76,9 @@ public:
     bool configure(const config& cfg);
     // False when the control task or the console cannot be started.
     bool start();
+    // RSSI (dBm) of the ground's frames at this radio, from the host's radio
+    // poll; sent in telemetry while fresh (2 s). Any thread.
+    void set_link_rssi(int dbm);
 
 private:
     struct Impl;

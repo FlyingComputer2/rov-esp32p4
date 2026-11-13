@@ -45,11 +45,17 @@ const param_info k_params[] = {
     {p_tau_v_s, "tau_v_s", 0.8f, 0.05f, 5, 0, "s"},
     {p_is_div, "is_div", 2, 1, 10, 0, "IS divider ratio"},
     {p_is_r_ohm, "is_r_ohm", 1000, 100, 10000, 0, "ohm"},
+    {p_vbus_div, "vbus_div", 12, 1, 50, 0, "VBUS divider ratio"},
     {p_failsafe_ms, "failsafe_ms", 300, 100, 2000, I, "ms"},
     {p_telem_hz, "telem_hz", 20, 1, 50, I, "Hz"},
     {p_mag_off_x, "mag_off_x", 0, -10, 10, 0, "gauss"},
     {p_mag_off_y, "mag_off_y", 0, -10, 10, 0, "gauss"},
     {p_mag_off_z, "mag_off_z", 0, -10, 10, 0, "gauss"},
+    {p_ch2_failsafe, "ch2_failsafe", 0, -1, 1, 0, "-1..1"},
+    {p_ch3_failsafe, "ch3_failsafe", 0, -1, 1, 0, "-1..1"},
+    {p_imu_enabled, "imu_enabled", 1, 0, 1, I | D, "0 ignores the IMU"},
+    {p_motor_reverse, "motor_reverse", 0, 0, 1, I, "0/1, 1 swaps RPWM / LPWM"},
+    {p_thr_min, "thr_min", 0, 0, 100, 0, "% duty just past the deadband"},
 };
 
 }  // namespace

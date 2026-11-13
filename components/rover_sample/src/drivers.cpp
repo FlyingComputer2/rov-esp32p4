@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "hal/gpio_ll.h"
 #include "soc/gpio_sig_map.h"
+#include "soc/soc_caps.h"
 
 namespace rover_sample
 {
@@ -63,11 +64,11 @@ int16_t le16(const uint8_t* p)
     return static_cast<int16_t>((p[1] << 8) | p[0]);
 }
 
-/* LEDC: the P4 has low-speed mode only. Timer 2 servo, timer 3 BTS; channels
- * 4-7. Timers / channels 0-1 / 0-3 are left free. */
+/* LEDC: the P4 has low-speed mode only. Timer 2 = all servos (CH1 ch4, CH2 ch0,
+ * CH3 ch1); timer 3 = BTS ch5-7. Channels 2-3 are unused. */
 constexpr ledc_mode_t k_mode = LEDC_LOW_SPEED_MODE;
 constexpr ledc_timer_t k_servo_timer = LEDC_TIMER_2;
-constexpr ledc_channel_t k_servo_ch = LEDC_CHANNEL_4;
+bool servo_timer_ready = false;
 constexpr ledc_timer_bit_t k_servo_bits = LEDC_TIMER_14_BIT;
 constexpr ledc_timer_t k_bts_timer = LEDC_TIMER_3;
 constexpr ledc_channel_t k_bts_ch[3] = {LEDC_CHANNEL_5, LEDC_CHANNEL_6, LEDC_CHANNEL_7};
@@ -234,10 +235,25 @@ bool magnetometer::read(float m[3])
     return true;
 }
 
-bool servo::init(int gpio, int hz)
+bool servo::init(int gpio, int hz, int ledc_ch)
 {
     hz_ = hz;
-    ok_ = ledc_timer(k_servo_timer, k_servo_bits, hz) && ledc_channel(k_servo_ch, k_servo_timer, gpio);
+    ch_ = static_cast<ledc_channel_t>(ledc_ch);
+    if (gpio < 0)
+    {
+        ok_ = false;
+        return false;
+    }
+    if (!servo_timer_ready)
+    {
+        if (!ledc_timer(k_servo_timer, k_servo_bits, hz))
+        {
+            ok_ = false;
+            return false;
+        }
+        servo_timer_ready = true;
+    }
+    ok_ = ledc_channel(ch_, k_servo_timer, gpio);
     return ok_;
 }
 
@@ -265,20 +281,116 @@ void servo::set_us(float us)
     }
     const float period_us = 1e6f / hz_;
     const uint32_t duty = static_cast<uint32_t>(us / period_us * ((1u << k_servo_bits) - 1));
-    ledc_set_duty(k_mode, k_servo_ch, duty);
-    ledc_update_duty(k_mode, k_servo_ch);
+    ledc_set_duty(k_mode, ch_, duty);
+    ledc_update_duty(k_mode, ch_);
 }
 
-bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz)
+namespace
+{
+
+// One oneshot handle + calibration per ADC unit, created on first use and kept
+// for the program: a unit can only be opened once, and the BTS IS inputs and
+// VBUS may share one. Only the control task calls this.
+struct adc_unit_slot
+{
+    adc_oneshot_unit_handle_t h = nullptr;
+    adc_cali_handle_t cali = nullptr;
+};
+adc_unit_slot adc_units[SOC_ADC_PERIPH_NUM];
+
+adc_unit_slot* adc_unit_get(adc_unit_t unit)
+{
+    if (unit < 0 || unit >= SOC_ADC_PERIPH_NUM)
+    {
+        return nullptr;
+    }
+    adc_unit_slot& s = adc_units[unit];
+    if (!s.h)
+    {
+        adc_oneshot_unit_init_cfg_t ucfg = {};
+        ucfg.unit_id = unit;
+        if (adc_oneshot_new_unit(&ucfg, &s.h) != ESP_OK)
+        {
+            s.h = nullptr;
+            return nullptr;
+        }
+        adc_cali_curve_fitting_config_t cal = {};
+        cal.unit_id = unit;
+        cal.atten = ADC_ATTEN_DB_12;
+        cal.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_cali_create_scheme_curve_fitting(&cal, &s.cali) != ESP_OK)
+        {
+            s.cali = nullptr;
+        }
+    }
+    return &s;
+}
+
+}  // namespace
+
+bool adc_input::init(int gpio)
+{
+    ok_ = false;
+    if (gpio < 0)
+    {
+        return false;
+    }
+    adc_unit_t unit;
+    if (adc_oneshot_io_to_channel(gpio, &unit, &ch_) != ESP_OK)
+    {
+        ESP_LOGW(TAG, "GPIO%d has no ADC channel", gpio);
+        return false;
+    }
+    adc_unit_slot* s = adc_unit_get(unit);
+    if (!s)
+    {
+        ESP_LOGW(TAG, "ADC%d unit init failed (GPIO%d)", unit + 1, gpio);
+        return false;
+    }
+    adc_oneshot_chan_cfg_t ccfg = {};
+    ccfg.atten = ADC_ATTEN_DB_12;
+    ccfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(s->h, ch_, &ccfg) != ESP_OK)
+    {
+        return false;
+    }
+    adc_ = s->h;
+    cali_ = s->cali;
+    ok_ = true;
+    return true;
+}
+
+float adc_input::read_v() const
+{
+    int raw = 0;
+    if (!ok_ || adc_oneshot_read(adc_, ch_, &raw) != ESP_OK)
+    {
+        return 0.f;
+    }
+    int mv = 0;
+    if (cali_ && adc_cali_raw_to_voltage(cali_, raw, &mv) == ESP_OK)
+    {
+        return mv / 1000.f;
+    }
+    return raw * 3.3f / 4095.f;
+}
+
+bool bts7960::init(int rpwm, int lpwm, int en, int l_en, int r_is, int l_is, int pwm_hz)
 {
     pins_[k_r] = rpwm;
     pins_[k_l] = lpwm;
     pins_[k_en] = en;
     en_ = en;
+    l_en_ = l_en;
     ok_ = ledc_timer(k_bts_timer, k_bts_bits, pwm_hz);
     for (int i = 0; i < 3 && ok_; ++i)
     {
         ok_ = ledc_channel(k_bts_ch[i], k_bts_timer, pins_[i]);
+    }
+    if (ok_ && l_en_ >= 0)
+    {
+        // L_EN wired apart from R_EN: route the same EN channel to it.
+        ok_ = ledc_set_pin(l_en_, k_mode, k_bts_ch[k_en]) == ESP_OK;
     }
     if (!ok_)
     {
@@ -286,33 +398,11 @@ bool bts7960::init(int rpwm, int lpwm, int en, int r_is, int l_is, int pwm_hz)
         return false;
     }
 
-    adc_unit_t unit_r, unit_l;
-    adc_channel_t ch_r, ch_l;
-    if (adc_oneshot_io_to_channel(r_is, &unit_r, &ch_r) == ESP_OK &&
-        adc_oneshot_io_to_channel(l_is, &unit_l, &ch_l) == ESP_OK && unit_r == unit_l)
+    if (r_is < 0 || l_is < 0)
     {
-        adc_oneshot_unit_init_cfg_t ucfg = {};
-        ucfg.unit_id = unit_r;
-        if (adc_oneshot_new_unit(&ucfg, &adc_) == ESP_OK)
-        {
-            adc_oneshot_chan_cfg_t ccfg = {};
-            ccfg.atten = ADC_ATTEN_DB_12;
-            ccfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-            adc_oneshot_config_channel(adc_, ch_r, &ccfg);
-            adc_oneshot_config_channel(adc_, ch_l, &ccfg);
-            ch_r_ = ch_r;
-            ch_l_ = ch_l;
-            adc_cali_curve_fitting_config_t cal = {};
-            cal.unit_id = unit_r;
-            cal.atten = ADC_ATTEN_DB_12;
-            cal.bitwidth = ADC_BITWIDTH_DEFAULT;
-            if (adc_cali_create_scheme_curve_fitting(&cal, &cali_) != ESP_OK)
-            {
-                cali_ = nullptr;
-            }
-        }
+        ESP_LOGI(TAG, "BTS7960 without current sense: current reads 0, no IS overload check");
     }
-    if (!adc_)
+    else if (!is_r_.init(r_is) || !is_l_.init(l_is))
     {
         ESP_LOGW(TAG, "BTS7960 IS on GPIO%d/%d: no ADC, current reads 0", r_is, l_is);
     }
@@ -330,23 +420,16 @@ void bts7960::deinit()
             ledc_stop(k_mode, k_bts_ch[i], 0);
         }
     }
-    if (cali_)
-    {
-        adc_cali_delete_scheme_curve_fitting(cali_);
-        cali_ = nullptr;
-    }
-    if (adc_)
-    {
-        adc_oneshot_del_unit(adc_);
-        adc_ = nullptr;
-    }
     ok_ = false;
 }
 
 void bts7960::duty(int i, float d)
 {
     d = std::fmin(std::fmax(d, 0.f), 1.f);
-    ledc_set_duty(k_mode, k_bts_ch[i], static_cast<uint32_t>(d * ((1u << k_bts_bits) - 1) + 0.5f));
+    // LEDC duty runs 0..2^bits; 2^bits is steady high (2^bits - 1 leaves a 1-tick low pulse
+    // every period, which an EN line held "high" must not have).
+    const uint32_t full = 1u << k_bts_bits;
+    ledc_set_duty(k_mode, k_bts_ch[i], d >= 1.f ? full : static_cast<uint32_t>(d * full + 0.5f));
     ledc_update_duty(k_mode, k_bts_ch[i]);
 }
 
@@ -381,26 +464,12 @@ void bts7960::apply(motor_cmd cmd, float d)
 
 float bts7960::read_current(float is_div, float r_is_ohm, float dt)
 {
-    if (!adc_)
+    if (!is_r_.ok() || !is_l_.ok())
     {
         return 0;
     }
-    auto volts = [&](int ch)
-    {
-        int raw = 0;
-        if (adc_oneshot_read(adc_, static_cast<adc_channel_t>(ch), &raw) != ESP_OK)
-        {
-            return 0.f;
-        }
-        int mv = 0;
-        if (cali_ && adc_cali_raw_to_voltage(cali_, raw, &mv) == ESP_OK)
-        {
-            return mv / 1000.f;
-        }
-        return raw * 3.3f / 4095.f;
-    };
     // Only the conducting half-bridge sources IS current.
-    const float v_is = std::fmax(volts(ch_r_), volts(ch_l_)) * is_div;
+    const float v_is = std::fmax(is_r_.read_v(), is_l_.read_v()) * is_div;
     // Above ~4 V at the IS pin the BTS is at its current limit or in fault
     // (I_IS(lim) ~4.5 mA into 1 k).
     overload_t_ = v_is > 4.0f ? overload_t_ + dt : 0.f;
@@ -413,6 +482,10 @@ void bts7960::reattach()
     if (ok_)
     {
         ledc_channel(k_bts_ch[k_en], k_bts_timer, en_);
+        if (l_en_ >= 0)
+        {
+            ledc_set_pin(l_en_, k_mode, k_bts_ch[k_en]);
+        }
         duty(k_en, 0);
     }
 }
@@ -420,12 +493,16 @@ void bts7960::reattach()
 bool IRAM_ATTR deadman::on_alarm(gptimer_handle_t, const gptimer_alarm_event_data_t*, void* arg)
 {
     auto* self = static_cast<deadman*>(arg);
-    const int en = self->en_gpio_.load();
-    if (en >= 0)
+    // Take EN (R_EN, and L_EN when on its own pin) off LEDC and drive it low:
+    // the bridge coasts.
+    const int pins[2] = {self->en_gpio_.load(), self->en_gpio2_.load()};
+    for (int en : pins)
     {
-        // Take EN off LEDC and drive it low: the bridge coasts.
-        esp_rom_gpio_connect_out_signal(en, SIG_GPIO_OUT_IDX, false, false);
-        gpio_ll_set_level(&GPIO, en, 0);
+        if (en >= 0)
+        {
+            esp_rom_gpio_connect_out_signal(en, SIG_GPIO_OUT_IDX, false, false);
+            gpio_ll_set_level(&GPIO, en, 0);
+        }
     }
     self->tripped_.store(true);
     return false;
