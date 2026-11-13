@@ -233,7 +233,7 @@ Parameters (`list` prints them; defaults are placeholders until the car is measu
 | Servo | `servo_min_us` 1100, `servo_center_us` 1500, `servo_max_us` 1900, `servo_reverse` 0, `servo_hz` 50 (disarmed only) |
 | Geometry | `steer_max_deg` 30 (wheel angle at full throw), `wheelbase_m` 0.26 |
 | Steering | `mode` 1, `rate_max_dps` 360, `a_lat_max` 8, `expo` 0.3, `kp` 0.004, `ki` 0.02, `kff` 1, `blend_v0` 0.5, `blend_v1` 1.5, `hold_kp` 2, `gyro_lpf_hz` 42, `imu_yaw_sign` -1 |
-| Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000, `vbus_div` 12 |
+| Motor | `bts_enabled` 0, `bts_pwm_hz` 20000 (both disarmed only), `thr_max_fwd` 60, `thr_max_rev` 40, `thr_min` 0 (% duty just past the deadband, static friction), `motor_reverse` 0 (1 swaps RPWM / LPWM), `thr_slew_ms` 300, `thr_deadband` 3, `rev_mode` 0, `brake_pct` 100, `i_max_a` 20, `top_speed_mps` 8, `tau_v_s` 0.8, `is_div` 2, `is_r_ohm` 1000, `vbus_div` 12 |
 | Link | `failsafe_ms` 300, `telem_hz` 20, `ch2_failsafe` / `ch3_failsafe` 0 (-1..1: CH2 / CH3 position without live RC, in failsafe or fault) |
 | Compass | `mag_off_x` / `_y` / `_z` (from `mag_cal`) |
 | IMU | `imu_enabled` 1 (disarmed only; 0 ignores the GY-521: no reads, arms without gyro calibration, steering always direct, attitude telemetry frozen) |

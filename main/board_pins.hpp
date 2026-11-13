@@ -20,7 +20,7 @@ constexpr gpio_num_t k_servo_ch1_pwm = GPIO_NUM_3;   // CH1 steering, header pin
 constexpr gpio_num_t k_servo_ch2_pwm = GPIO_NUM_2;   // CH2 (RC aux), header pin 21
 constexpr gpio_num_t k_servo_ch3_pwm = GPIO_NUM_26;  // CH3 (RC aux2), header pin 31
 
-// --- BTS7960 / IBT-2 motor bridge (20 kHz PWM; EN tied R_EN+L_EN) ---
+// --- BTS7960 / IBT-2 motor bridge (PWM `bts_pwm_hz`, default 20 kHz; R_EN and L_EN on own pins, same signal) ---
 constexpr gpio_num_t k_bts_rpwm = GPIO_NUM_4;   // header pin 18
 constexpr gpio_num_t k_bts_lpwm = GPIO_NUM_5;   // header pin 16
 constexpr gpio_num_t k_bts_en = GPIO_NUM_6;     // R_EN, header pin 15 (10k pulldown)
