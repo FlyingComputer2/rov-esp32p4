@@ -188,6 +188,27 @@ void test_arming_failsafe()
     CHECK(c.step(rc_in(0, 0, false), p).st == state::disarmed);
 }
 
+void test_throttle_min()
+{
+    params p;
+    p.set(p_thr_min, 40);
+    p.set(p_rev_mode, 1);
+    controller c;
+    c.step(rc_in(0, 0, true), p);
+    // Just past the deadband: thr_min; full stick: thr_max_fwd; between: linear.
+    auto out = run(c, p, rc_in(0, 0.031f, true), 2.0f);
+    CHECK_NEAR(out.duty, 0.4f, 2e-3f);
+    out = run(c, p, rc_in(0, 1, true), 2.0f);
+    CHECK_NEAR(out.duty, 0.6f, 1e-3f);
+    out = run(c, p, rc_in(0, 0.515f, true), 2.0f);
+    CHECK_NEAR(out.duty, 0.5f, 2e-3f);
+    // Reverse the same, capped at thr_max_rev; inside the deadband nothing.
+    out = run(c, p, rc_in(0, -1, true), 2.0f);
+    CHECK_NEAR(out.duty, -0.4f, 1e-3f);
+    out = run(c, p, rc_in(0, 0.02f, true), 0.5f);
+    CHECK(out.motor == motor_cmd::coast);
+}
+
 void test_throttle_esc()
 {
     params p;
@@ -387,6 +408,7 @@ int main()
     test_params();
     test_arming_failsafe();
     test_throttle_esc();
+    test_throttle_min();
     test_rate_loop();
     test_rc_link();
     test_gyro_cal_and_ahrs();

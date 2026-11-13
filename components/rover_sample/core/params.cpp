@@ -54,6 +54,8 @@ const param_info k_params[] = {
     {p_ch2_failsafe, "ch2_failsafe", 0, -1, 1, 0, "-1..1"},
     {p_ch3_failsafe, "ch3_failsafe", 0, -1, 1, 0, "-1..1"},
     {p_imu_enabled, "imu_enabled", 1, 0, 1, I | D, "0 ignores the IMU"},
+    {p_motor_reverse, "motor_reverse", 0, 0, 1, I, "0/1, 1 swaps RPWM / LPWM"},
+    {p_thr_min, "thr_min", 0, 0, 100, 0, "% duty just past the deadband"},
 };
 
 }  // namespace

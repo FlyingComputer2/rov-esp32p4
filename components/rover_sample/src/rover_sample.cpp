@@ -569,7 +569,9 @@ void app::control_task()
         }
         if (bts_on)
         {
-            bts_.apply(out.motor, out.duty);
+            // motor_reverse swaps RPWM / LPWM only; brake and telemetry keep the logical sign.
+            const bool swap = out.motor == motor_cmd::drive && p.get(p_motor_reverse) >= 1.f;
+            bts_.apply(out.motor, swap ? -out.duty : out.duty);
         }
         deadman_.kick();
 
