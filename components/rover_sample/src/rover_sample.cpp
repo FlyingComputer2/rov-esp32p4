@@ -50,6 +50,12 @@ constexpr int k_probe_every = 500;  // retry a missing sensor every 2 s
 constexpr int k_imu_fail_limit = 10;
 constexpr int k_servo_ledc_ch[3] = {4, 0, 1};  // CH1 steering, CH2, CH3
 
+// Aux servos (CH2, CH3): plain 1000..2000 us, not the steering trims.
+float aux_to_us(float s)
+{
+    return 1500.f + 500.f * std::fmax(-1.f, std::fmin(1.f, s));
+}
+
 float norm_to_us(float s, const params& p)
 {
     const float c = p.get(p_servo_center_us);
@@ -332,6 +338,7 @@ void app::control_task()
     bool mag_cal = false, mag_ok = false;
     int64_t prev = esp_timer_get_time();
     uint32_t n = 0;
+    float vbus_v = 0;  // updated at 50 Hz, kept between reads
     TickType_t wake = xTaskGetTickCount();
 
     for (;;)
@@ -506,7 +513,11 @@ void app::control_task()
         {
             current = bts_.read_current(p.get(p_is_div), p.get(p_is_r_ohm), dt);
         }
-        const float vbus_v = vbus_.read_v() * p.get(p_vbus_div);
+        // VBUS is for 20 Hz telemetry: read at 50 Hz, not on every 250 Hz cycle.
+        if (n % k_mag_every == 0)
+        {
+            vbus_v = vbus_.read_v() * p.get(p_vbus_div);
+        }
 
         in.imu_ok = imu_ok;
         in.gyro_cal = cal.done();
@@ -541,7 +552,7 @@ void app::control_task()
             {
                 continue;
             }
-            float us = norm_to_us(norm[ch], p);
+            float us = ch == 0 ? norm_to_us(norm[ch], p) : aux_to_us(norm[ch]);
             if (out.st == state::disarmed && override_us[ch] > 0)
             {
                 us = override_us[ch];

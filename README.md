@@ -177,8 +177,8 @@ Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
 |--------|------|------------|-------|
 | I2C SDA / SCL | 7 / 8 | 3 / 5 | The board I2C (`ESP_I2C_SDA` / `_SCL`), shared with the camera SCCB (0x36) and the ES8311 (0x18); 2.2 k pull-ups on the board. GY-521 at 0x68, GY-271 at 0x0d (QMC) or 0x1e (HMC) |
 | CH1 steering PWM | 3 | 19 | Separate 5–6 V supply, common ground |
-| CH2 aux PWM | 2 | 21 | RC `aux`; `ch2_failsafe` without live RC |
-| CH3 aux PWM | 26 | 31 | RC `aux2`; `ch3_failsafe` without live RC |
+| CH2 aux PWM | 2 | 21 | RC `aux` → 1000–2000 µs (not the steering trims); `ch2_failsafe` without live RC |
+| CH3 aux PWM | 26 | 31 | RC `aux2` → 1000–2000 µs; `ch3_failsafe` without live RC |
 | BTS7960 RPWM / LPWM | 4 / 5 | 18 / 16 | 20 kHz |
 | BTS7960 R_EN + L_EN | 6 | 15 | Tied together; 10 k pull-down to GND so a P4 reset coasts |
 | BTS7960 R_IS / L_IS | 21 / 23 | 11 / 7 | ADC1, through a divider (IS reaches ~5 V); ratio in `is_div` |

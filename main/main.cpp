@@ -374,10 +374,7 @@ std::atomic<rover_sample::Applet*> g_car {nullptr};
 void start_rssi_poll(const winject::L3& l3)
 {
     // Called on l3's thread: keep its pthread config for the threads it starts.
-    esp_pthread_cfg_t prev = esp_pthread_get_default_config();
-    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
-    const esp_pthread_cfg_t cfg = psram_thread_cfg("rssi_poll", 4 * 1024, 3);
-    esp_pthread_set_cfg(&cfg);
+    scoped_pthread_cfg scoped(psram_thread_cfg("rssi_poll", 4 * 1024, 3));
     std::thread(
         [l3]
         {
@@ -402,10 +399,6 @@ void start_rssi_poll(const winject::L3& l3)
             }
         })
         .detach();
-    if (had_prev)
-    {
-        esp_pthread_set_cfg(&prev);
-    }
 }
 
 void start_applets()
