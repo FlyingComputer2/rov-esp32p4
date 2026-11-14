@@ -56,6 +56,7 @@ const param_info k_params[] = {
     {p_imu_enabled, "imu_enabled", 1, 0, 1, I | D, "0 ignores the IMU"},
     {p_motor_reverse, "motor_reverse", 0, 0, 1, I, "0/1, 1 swaps RPWM / LPWM"},
     {p_thr_min, "thr_min", 0, 0, 100, 0, "% duty just past the deadband"},
+    {p_steer_limit, "steer_limit", 85, 10, 100, 0, "% of the servo throw CH1 steering uses"},
 };
 
 }  // namespace

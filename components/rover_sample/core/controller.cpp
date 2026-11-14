@@ -144,14 +144,17 @@ float controller::steer(const control_input& in, const params& p, steer_mode mod
         return 0;
     }
     const float stick = clamp1(in.steer);
+    // steer_limit shrinks the throw: full stick reaches +-lim, the rate loop saturates there.
+    const float lim = p.get(p_steer_limit) / 100.f;
     const float se = expo(stick, p.get(p_expo));
+    const float direct = se * lim;
     if (st_ == state::disarmed || mode == steer_mode::direct)
     {
         // Disarmed: the servo follows the stick, for setup on the bench.
         integ_ = 0;
         holding_ = false;
         centred_t_ = 0;
-        return se;
+        return direct;
     }
 
     const float v = std::fmax(v_, 0.f);
@@ -205,13 +208,13 @@ float controller::steer(const control_input& in, const params& p, steer_mode mod
     {
         // Anti-windup: no integration that pushes a saturated output further.
         const float next = integ_ + p.get(p_ki) * e * dt;
-        if (std::fabs(pd + next) < 1.f || sgn(e) != sgn(pd + integ_))
+        if (std::fabs(pd + next) < lim || sgn(e) != sgn(pd + integ_))
         {
-            integ_ = std::fmin(std::fmax(next, -1.f), 1.f);
+            integ_ = std::fmin(std::fmax(next, -lim), lim);
         }
     }
-    const float rate_out = clamp1(pd + integ_);
-    return clamp1((1.f - alpha) * se + alpha * rate_out);
+    const float rate_out = std::fmin(std::fmax(pd + integ_, -lim), lim);
+    return std::fmin(std::fmax((1.f - alpha) * direct + alpha * rate_out, -lim), lim);
 }
 
 void controller::throttle(const control_input& in, const params& p, control_output* out)

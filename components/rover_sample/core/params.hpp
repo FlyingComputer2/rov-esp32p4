@@ -54,7 +54,8 @@ enum param_id : uint8_t
     p_imu_enabled = 55,   // 0: ignore the IMU (no reads, arm allowed, direct steering)
     p_motor_reverse = 56, // 1: swap the BTS outputs (RPWM <-> LPWM), motor wired the other way
     p_thr_min = 57,       // % duty just past the deadband (static friction), forward and reverse
-    p_id_end = 58,
+    p_steer_limit = 58,   // % of the servo_min/max throw steering uses: full stick in direct, rate loop saturation
+    p_id_end = 59,
 };
 
 enum : uint8_t
