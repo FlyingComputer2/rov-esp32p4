@@ -121,12 +121,17 @@ std::vector<uint8_t> pack(const telem_frame& t)
     w.u8(t.flags);
     w.u16(t.vbus);
     w.u8(static_cast<uint8_t>(t.rssi));
+    w.u32(t.link_ms);
+    w.u32(t.link_rx_bytes);
+    w.u32(t.link_rx_packets);
+    w.u32(t.link_rx_lost);
     return w.out;
 }
 
 std::optional<telem_frame> unpack_telem(const std::vector<uint8_t>& payload)
 {
-    if (payload.size() != k_telem_bytes && payload.size() != k_telem_bytes_v1)
+    if (payload.size() != k_telem_bytes && payload.size() != k_telem_bytes_v2 &&
+        payload.size() != k_telem_bytes_v1)
     {
         return std::nullopt;
     }
@@ -152,10 +157,17 @@ std::optional<telem_frame> unpack_telem(const std::vector<uint8_t>& payload)
     t.rc_loss = r.u16();
     t.rc_lat_ms = r.u16();
     t.flags = r.u8();
-    if (payload.size() == k_telem_bytes)
+    if (payload.size() >= k_telem_bytes_v2)
     {
         t.vbus = r.u16();
         t.rssi = static_cast<int8_t>(r.u8());
+    }
+    if (payload.size() == k_telem_bytes)
+    {
+        t.link_ms = r.u32();
+        t.link_rx_bytes = r.u32();
+        t.link_rx_packets = r.u32();
+        t.link_rx_lost = r.u32();
     }
     return t;
 }

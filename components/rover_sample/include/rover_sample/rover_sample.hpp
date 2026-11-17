@@ -79,6 +79,10 @@ public:
     // RSSI (dBm) of the ground's frames at this radio, from the host's radio
     // poll; sent in telemetry while fresh (2 s). Any thread.
     void set_link_rssi(int dbm);
+    // Receive side of the ground -> rover air link, from the host's L3
+    // upstream stats (free-running, summed over upstreams); sent in every
+    // telemetry frame with the time of this call. Any thread.
+    void set_link_rx(uint64_t bytes, uint64_t packets, uint64_t lost);
 
 private:
     struct Impl;
