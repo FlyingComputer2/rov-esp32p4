@@ -308,13 +308,34 @@ void test_rate_loop()
     }
     CHECK(std::fabs(s.yaw_rate_dps) < 2.f);
 
-    // Standstill: direct steering (stick 1 -> full servo), no windup.
+    // Standstill: direct steering (stick 1 -> steer_limit, default 85 %), no windup.
     controller c3;
     c3.step(rc_in(0, 0, true), p);
     out = run(c3, p, rc_in(1, 0, true), 2.0f);
-    CHECK_NEAR(out.servo, 1.f, 1e-3f);
+    CHECK_NEAR(out.servo, 0.85f, 1e-3f);
     out = c3.step(rc_in(0, 0, true), p);
     CHECK_NEAR(out.servo, 0.f, 1e-3f);
+    out = c3.step(rc_in(-1, 0, true), p);
+    CHECK_NEAR(out.servo, -0.85f, 1e-3f);
+    p.set(p_steer_limit, 100);
+    out = c3.step(rc_in(1, 0, true), p);
+    CHECK_NEAR(out.servo, 1.f, 1e-3f);
+    p.set(p_steer_limit, 60);
+    out = c3.step(rc_in(0.5f, 0, true), p);
+    CHECK_NEAR(out.servo, 0.6f * expo(0.5f, p.get(p_expo)), 1e-3f);
+    CHECK(p.set(p_steer_limit, 5) == 10);
+
+    // At speed, the rate loop saturates at steer_limit: no yaw response, full stick.
+    p.set(p_steer_limit, 70);
+    controller c4;
+    c4.step(rc_in(0, 0, true), p);
+    run(c4, p, rc_in(0, 0.5f, true), 4.0f);
+    CHECK(c4.v_est() > 2.f);
+    out = run(c4, p, rc_in(1, 0.5f, true), 2.0f);
+    CHECK(out.mode == steer_mode::rate);
+    CHECK_NEAR(out.servo, 0.7f, 1e-3f);
+    out = run(c4, p, rc_in(-1, 0.5f, true), 2.0f);
+    CHECK_NEAR(out.servo, -0.7f, 1e-3f);
 
     // IMU gone: direct, flagged.
     auto noimu = rc_in(0.3f, 0, true);
