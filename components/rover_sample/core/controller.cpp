@@ -172,8 +172,8 @@ float controller::steer(const control_input& in, const params& p, steer_mode mod
                 holding_ = true;
                 hold_ref_ = yaw_deg_;
             }
-            const float lim = r_max * 0.5f;
-            r_cmd = std::fmin(std::fmax(p.get(p_hold_kp) * wrap180(hold_ref_ - yaw_deg_), -lim), lim);
+            const float r_hold = r_max * 0.5f;
+            r_cmd = std::fmin(std::fmax(p.get(p_hold_kp) * wrap180(hold_ref_ - yaw_deg_), -r_hold), r_hold);
         }
     }
     else
