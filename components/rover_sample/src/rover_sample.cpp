@@ -167,6 +167,14 @@ class app
         link_rssi_.store(dbm, std::memory_order_relaxed);
         link_rssi_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
     }
+    void set_link_rx(uint64_t bytes, uint64_t packets, uint64_t lost)
+    {
+        std::lock_guard<std::mutex> lock(link_rx_mu_);
+        link_rx_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        link_rx_bytes_ = static_cast<uint32_t>(bytes);
+        link_rx_packets_ = static_cast<uint32_t>(packets);
+        link_rx_lost_ = static_cast<uint32_t>(lost);
+    }
     bool configure();
     bool start();
     // Reactor thread: drain RC, send telemetry when due; one console line.
@@ -199,6 +207,8 @@ class app
     bool configured_ = false;
     std::atomic<int> link_rssi_ {0};
     std::atomic<int64_t> link_rssi_us_ {INT64_MIN / 2};
+    std::mutex link_rx_mu_;  // the four link_rx_ fields, one sample
+    uint32_t link_rx_ms_ = 0, link_rx_bytes_ = 0, link_rx_packets_ = 0, link_rx_lost_ = 0;
     mpu6050 imu_;
     magnetometer mag_;
     servo servo_[3];
@@ -732,6 +742,13 @@ void app::send_telem()
     {
         t.rssi = static_cast<int8_t>(link_rssi_.load(std::memory_order_relaxed));
     }
+    {
+        std::lock_guard<std::mutex> lock(link_rx_mu_);
+        t.link_ms = link_rx_ms_;
+        t.link_rx_bytes = link_rx_bytes_;
+        t.link_rx_packets = link_rx_packets_;
+        t.link_rx_lost = link_rx_lost_;
+    }
     t.seq = telem_seq_++;
     t.t_us = realtime_us32();
     send(msp::k_from_rover, k_func_telem, pack(t));
@@ -1129,6 +1146,14 @@ void Applet::set_link_rssi(int dbm)
     if (impl_->instance)
     {
         impl_->instance->set_link_rssi(dbm);
+    }
+}
+
+void Applet::set_link_rx(uint64_t bytes, uint64_t packets, uint64_t lost)
+{
+    if (impl_->instance)
+    {
+        impl_->instance->set_link_rx(bytes, packets, lost);
     }
 }
 

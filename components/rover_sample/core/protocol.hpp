@@ -103,9 +103,18 @@ struct telem_frame
     uint8_t flags = 0;
     uint16_t vbus = 0;  // 10 mV, 0 = no VBUS sense
     int8_t rssi = 0;    // dBm of the ground's frames at the rover C6, 0 = unknown
+    // Ground -> rover air link as this rover's L3 receives it, summed over all
+    // upstreams; free-running counters, sampled at link_ms (rover monotonic
+    // ms). Receivers take rates and loss from the difference of two samples.
+    // All 0 = unknown.
+    uint32_t link_ms = 0;
+    uint32_t link_rx_bytes = 0;    // air bytes received (FEC wire bytes on FEC upstreams)
+    uint32_t link_rx_packets = 0;  // air frames received
+    uint32_t link_rx_lost = 0;     // air frames missing from the upstream sequences
 };
-// pack() writes 42 B; unpack_telem() also takes the older 39 B frame.
-constexpr size_t k_telem_bytes = 42;
+// pack() writes 58 B; unpack_telem() also takes the older 42 B and 39 B frames.
+constexpr size_t k_telem_bytes = 58;
+constexpr size_t k_telem_bytes_v2 = 42;
 constexpr size_t k_telem_bytes_v1 = 39;
 
 std::vector<uint8_t> pack(const rc_frame& rc);

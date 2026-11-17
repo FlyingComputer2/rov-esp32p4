@@ -94,11 +94,20 @@ void test_protocol()
     t.flags = 0x3f;
     t.vbus = 1234;
     t.rssi = -67;
+    t.link_ms = 0x80000001u;
+    t.link_rx_bytes = 123456789;
+    t.link_rx_packets = 4000000000u;
+    t.link_rx_lost = 77;
     auto tp = pack(t);
     CHECK(tp.size() == k_telem_bytes);
     auto tb = unpack_telem(tp);
     CHECK(tb && tb->seq == 7 && tb->roll == -12345 && tb->heading == 35999 && tb->flags == 0x3f);
     CHECK(tb->vbus == 1234 && tb->rssi == -67);
+    CHECK(tb->link_ms == 0x80000001u && tb->link_rx_bytes == 123456789 &&
+          tb->link_rx_packets == 4000000000u && tb->link_rx_lost == 77);
+    auto tv2 = unpack_telem(std::vector<uint8_t>(tp.begin(), tp.begin() + k_telem_bytes_v2));
+    CHECK(tv2 && tv2->rssi == -67 && tv2->link_rx_bytes == 0 && tv2->link_ms == 0);
+    CHECK(!unpack_telem(std::vector<uint8_t>(tp.begin(), tp.begin() + 50)));
     auto tv1 = unpack_telem(std::vector<uint8_t>(tp.begin(), tp.begin() + k_telem_bytes_v1));
     CHECK(tv1 && tv1->flags == 0x3f && tv1->vbus == 0 && tv1->rssi == 0);
 

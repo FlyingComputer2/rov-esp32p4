@@ -368,9 +368,36 @@ void run_apps_reactor()
 // rover_sample, for the radio RSSI poll (set before winject-l3 starts).
 std::atomic<rover_sample::Applet*> g_car {nullptr};
 
-/* RSSI of the ground's frames at our C6 (radio_info `radio_rx rssi`), for
- * rover_sample's telemetry (CRSF uplink RSSI on the phone). Polls at 2 Hz
- * with the blocking form, so it runs on a thread of its own, never on l3's. */
+/* Receive side of the ground -> rover air link, summed over all upstreams:
+ * air bytes and frames (FEC wire on FEC upstreams) and frames missing from
+ * the upstream sequences. False when l3 cannot list its upstreams. */
+bool sum_link_rx(const winject::L3& l3, uint64_t* bytes, uint64_t* packets, uint64_t* lost)
+{
+    auto ups = l3.upstreams().list();
+    if (!ups.ok())
+    {
+        return false;
+    }
+    *bytes = *packets = *lost = 0;
+    for (const auto& up : ups.value)
+    {
+        const auto s = up.rx_stats();
+        if (!s.ok())
+        {
+            continue;
+        }
+        const bool fec = s.value.fec_packets > 0;
+        *bytes += fec ? s.value.fec_bytes : s.value.bytes;
+        *packets += fec ? s.value.fec_packets : s.value.packets;
+        *lost += s.value.air_gap;
+    }
+    return true;
+}
+
+/* RSSI of the ground's frames at our C6 (radio_info `radio_rx rssi`) and the
+ * link's receive counters, for rover_sample's telemetry (CRSF uplink RSSI and
+ * the phone's GNDTX OSD line). Polls at 2 Hz with the blocking form, so it
+ * runs on a thread of its own, never on l3's. */
 void start_rssi_poll(const winject::L3& l3)
 {
     // Called on l3's thread: keep its pthread config for the threads it starts.
@@ -385,6 +412,11 @@ void start_rssi_poll(const winject::L3& l3)
                 if (!car)
                 {
                     continue;
+                }
+                uint64_t bytes, packets, lost;
+                if (sum_link_rx(l3, &bytes, &packets, &lost))
+                {
+                    car->set_link_rx(bytes, packets, lost);
                 }
                 auto radio = l3.radios().get();
                 if (!radio.ok())
