@@ -262,4 +262,4 @@ Video runs end to end over the air on the bench (P4 + C6 → GS RTL8812AU, a few
 Open points:
 - Channel 1 needs the GS on channel 1 too (the ground P4 is). The cause of the per-channel loss (local in-band interference or desense at each receiver) is not known; channel 1 may not be the clean one elsewhere.
 - TX pacing on the P4: winject-l3's reactor and TX thread wait in FreeRTOS ticks (1 ms), coarser than on Linux.
-- FEC moved from vstreamer to winject-l3's upstream 1 (`config/winject.conf`: 6/8, 4 ms spread); change it on the l3 console with `uu id=1 k= n= fec_spread=` (a hot-swap of the upstream). The ground's receiver reports the upstream's air counters back to `stream_sender` as the link half of its link reports.
+- FEC moved from vstreamer to winject-l3's upstream 1 (`config/winject.conf`: 6/8, 4 ms spread); change it on the l3 console with `uu id=1 k= n= fec_spread=`; it applies from the next FEC block, without restarting the stream or dropping anything. The ground's receiver reports the upstream's air counters back to `stream_sender` as the link half of its link reports.
