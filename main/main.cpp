@@ -38,6 +38,7 @@
 #include <bfc/shared_sized_buffer.hpp>
 
 #include "WinjectL3.h"
+#include "winject_fec/rs_kernel.hpp"
 #include "winject_l3/Console.h"
 #include "synch/SynchGpio.h"
 #include "core/thread_spawn.hpp"
@@ -148,17 +149,14 @@ constexpr size_t k_video_rx_capacity = 16;
  * core 0 ran out of time above ~8 Mbit/s. */
 constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 14};
 
-/* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING,
- * no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
- * protects the stream end to end; datagrams must stay within winject-l3's
- * 1445-byte application limit, which the payloader's 1400-byte mtu (live TX
- * default) keeps them under. Bench over the air (C6 -> RTL8812AU): on
- * channel 13 (~7% isolated frame loss) 6 Mbit/s with FEC 21/31 and 75 ms
- * spread gave 0-0.7% residual loss at 22-27 fps, 10/12 left 3.8% (3.6 fps)
- * and 15/31 ran core 0 out of time; on channel 1 (~1% loss) every FEC tried
- * was clean. Bitrate (src bitrate, kbit/s), FEC and spread can be changed at run time
- * on the vstreamer m-plane (UDP 5090), where `set tx pause 1` / `0` also
- * pauses and resumes live TX. */
+/* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING with
+ * FEC 6/8, 4 ms spread; the GS delivers it to its receiver). vstreamer has no FEC
+ * of its own: each RTP packet goes out once, with a 3-byte sequence header, and l3
+ * protects it on the air. Datagrams must stay within l3's 1438-byte FEC limit,
+ * which the payloader's 1400-byte mtu (live TX default) keeps them under. Bitrate
+ * (src bitrate, kbit/s) can be changed at run time on the vstreamer m-plane (UDP
+ * 5090), where `set tx pause 1` / `0` also pauses and resumes live TX; FEC is set
+ * on the l3 console (`uu id=1 k= n= fec_spread=`). */
 constexpr int k_video_mplane_port = 5090;
 
 /* The applets' upstreams (config/winject.conf): QUEUE_FORWARDING on named
@@ -249,6 +247,24 @@ bool start_dplane_queues()
     {
         return false;
     }
+    /* l3's FEC (upstream 1) encodes on this reactor: check the PIE kernel against the table
+     * path there first (its first use may bind the task to its core). A mismatch turns PIE
+     * off for good. */
+    cv->wake_up(
+        []
+        {
+            for (int rows : {1, 2, 10})
+            {
+                int64_t   fast_us = 0, table_us = 0;
+                const int bad = winject::fec::rs_encode_selftest(
+                    21, rows, 1403, 2, [] { return int64_t(esp_timer_get_time()); }, &fast_us,
+                    &table_us);
+                printf("ROVER_RS_SELFTEST rows=%d mismatches=%d backend=%s fast_us=%lld "
+                       "table_us=%lld\n",
+                       rows, bad, winject::fec::rs_encode_scalar_impl(), (long long)fast_us,
+                       (long long)table_us);
+            }
+        });
     vstreamer::spawn_thread(k_dp_reactor_thread, [cv] { cv->run(); }).detach();
     return true;
 }
@@ -386,9 +402,9 @@ bool sum_link_rx(const winject::L3& l3, uint64_t* bytes, uint64_t* packets, uint
         {
             continue;
         }
-        const bool fec = s.value.fec_packets > 0;
-        *bytes += fec ? s.value.fec_bytes : s.value.bytes;
-        *packets += fec ? s.value.fec_packets : s.value.packets;
+        /* Every slot from the air, plain and FEC, before recovery. */
+        *bytes += s.value.air_bytes;
+        *packets += s.value.air_packets;
         *lost += s.value.air_gap;
     }
     return true;
@@ -624,9 +640,7 @@ vstreamer::idf::live_tx_config video_config()
     cfg.mplane_reactor = k_apps_reactor;
     cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
-    /* In order: fec_k before fec_n, since k may not exceed the current n (sender starts at
-     * k=10, n=12). */
-    cfg.snd = {{"fec", "block"}, {"fec_k", "6"}, {"fec_n", "8"}, {"fec_spread_ms", "4"}};
+    /* No sender keys: FEC is l3's (upstream 1). */
     return cfg;
 }
 

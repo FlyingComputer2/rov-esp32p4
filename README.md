@@ -4,7 +4,7 @@ Main application of the rover's ESP32-P4 (Waveshare ESP32-P4-WIFI6-DEV-KIT, ESP3
 
 - **winject SDIO proxy** ([winject-radio-esp32-sdio-proxy](https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy)): drives the C6 ([winject-radio-esp32c6](https://github.com/winject-wireless/winject-radio-esp32c6)) and exposes it as a winject radio: m-plane on UDP 22, d-plane on in-process queues. Its HTTP server (firmware update) is off on this board.
 - **winject-l3** ([winject-l3](https://github.com/winject-wireless/winject-l3), `idf/winject_l3`): winject-manager on a pthread, using that radio (`radio.mplane = 127.0.0.1:22`, `radio.dplane_tx/_rx` queues).
-- **vstreamer** ([vstreamer](https://github.com/FlyingComputer2/vstreamer), `idf/vstreamer`): live TX (`vstreamer::idf::run_live_tx`): OV5647 MIPI-CSI camera → ISP + hardware H.264 (1080p30, 6 Mbit/s) → RTP → `stream_sender` with RS FEC 21/31, into winject-l3's video upstream over queues.
+- **vstreamer** ([vstreamer](https://github.com/FlyingComputer2/vstreamer), `idf/vstreamer`): live TX (`vstreamer::idf::run_live_tx`): OV5647 MIPI-CSI camera → ISP + hardware H.264 (1080p30, 6 Mbit/s) → RTP → `stream_sender`, into winject-l3's video upstream over queues; l3 protects it with FEC (winject-fec).
 - **krono** ([FlyingComputer2/krono](https://github.com/FlyingComputer2/krono), `idf/krono`): clock-sync client on upstream 0 (named queues `synch_tx` / `synch_rx`, on the app reactor); the ground P4 is the server and holds the reference clock. UDP console 5110 (see [Clock sync](#clock-sync)).
 - **app_bwtest** (winject-l3, `idf/app_bwtest`): bandwidth tester on upstream 2 (named queues `bwtest_tx` / `bwtest_rx`, on the app reactor); UDP console 5100 (see [Bandwidth test](#bandwidth-test)).
 - **rover_sample** (`components/rover_sample`): RC car (steering servo, BTS7960 motor bridge, GY-521 IMU, GY-271 compass) with rate-mode steering; RC in and telemetry out over upstream 3 (named queues `rc_tx` / `rc_rx`, on the app reactor); UDP console 5120 (see [RC car](#rc-car-rover_sample)).
@@ -69,7 +69,7 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 | id | Stream | Rover endpoint | Buses (tx / rx) | Manager FEC |
 |----|--------|----------------|-----------------|-------------|
 | 0 | Clock sync (krono SynchClient) | named queues `synch_tx` (in) / `synch_rx` (out), L3 side on `rover_dp` | b2 / a1 | none |
-| 1 | Video (vstreamer live TX) | queues `video_tx` (in) / `video_rx` (out) | c3 / d4 | none: vstreamer's own RS FEC runs end to end |
+| 1 | Video (vstreamer live TX) | queues `video_tx` (in) / `video_rx` (out) | c3 / d4 | RS 6/8, 4 ms spread, 20 ms flush (vstreamer has no FEC) |
 | 2 | Bandwidth tester (app_bwtest) | named queues `bwtest_tx` / `bwtest_rx`, L3 side on `rover_dp` | f6 / e5 | none |
 | 3 | RC car (rover_sample): RC in, telemetry out | named queues `rc_tx` / `rc_rx`, L3 side on `rover_dp` | 17 / 28 | none: RC repeats every 20 ms |
 | 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | none. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
@@ -81,7 +81,7 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 
 Existing upstreams keep their ids and buses. Upstreams 7 and 8 are the tester's and the sync client's m-planes: their applets serve their consoles' commands directly on their queues (no socket in between). Like 4-6, the ground is a UDP server that replies to the last sender, so one operator at a time. Upstreams 5 to 9 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`. Update both boards together: before this layout, 7-9 went through `mplane_relay`, which prefixed a client-id byte, so a relay image and a direct image do not understand each other's 7-9 traffic.
 
-The video settings (bitrate, FEC 6/8, `fec_spread_ms` 4; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1445-byte limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`; `set tx pause 1` pauses live TX, nothing sent while camera and encoder keep running, and `set tx pause 0` resumes it from a fresh IDR). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
+The video settings (bitrate; the payloader's 1400-byte `mtu` keeps datagrams under winject-l3's 1438-byte FEC limit) are in `main/main.cpp`; they can be changed locally on UDP 5090 or from the ground on UDP 5092 (`get/set src|pay|snd <key>`; `set tx pause 1` pauses live TX, nothing sent while camera and encoder keep running, and `set tx pause 0` resumes it from a fresh IDR). The manager console, C6 radio m-plane and vstreamer m-plane have no authentication. Upstream 5 lets a ground-side client change the rover radio's channel, power and modulation or reset it, and upstream 6 lets one reconfigure the rover video path; use only on the trusted domain/link.
 
 ## App and C6 update (udp_ota)
 
@@ -262,4 +262,4 @@ Video runs end to end over the air on the bench (P4 + C6 → GS RTL8812AU, a few
 Open points:
 - Channel 1 needs the GS on channel 1 too (the ground P4 is). The cause of the per-channel loss (local in-band interference or desense at each receiver) is not known; channel 1 may not be the clean one elsewhere.
 - TX pacing on the P4: winject-l3's reactor and TX thread wait in FreeRTOS ticks (1 ms), coarser than on Linux.
-- Reverse telemetry (receiver → `stream_sender`, for adaptive FEC) is off.
+- FEC moved from vstreamer to winject-l3's upstream 1 (`config/winject.conf`: 6/8, 4 ms spread); change it on the l3 console with `uu id=1 k= n= fec_spread=`; it applies from the next FEC block, without restarting the stream or dropping anything. The ground's receiver reports the upstream's air counters back to `stream_sender` as the link half of its link reports.

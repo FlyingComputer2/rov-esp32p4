@@ -4,7 +4,7 @@
 # Local checkouts: -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=<dir>,
 # -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY=<dir>,
 # -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=<dir>, -DFETCHCONTENT_SOURCE_DIR_KRONO=<dir>,
-# -DFETCHCONTENT_SOURCE_DIR_SYS_APPLET=<dir>.
+# -DFETCHCONTENT_SOURCE_DIR_SYS_APPLET=<dir>, -DFETCHCONTENT_SOURCE_DIR_WINJECT_FEC=<dir>.
 cmake_minimum_required(VERSION 3.16)
 if(NOT DEFINED PROJECT_VER)
     set(PROJECT_VER "0.1.0")
@@ -23,17 +23,16 @@ FetchContent_Declare(bfc
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG 4255053470eb485356b9623e578ecd384165a03a
+    GIT_TAG 1af14c513dad7dbf4dba4166825a4e1e756874fe
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
     GIT_TAG 1b2411580697b4fb36e5d4611f3b918620c496d6
 )
-# vstreamer and winject-l3 also share the isa-l FetchContent name; whichever
-# is declared first wins, so keep their pins equal.
+# vstreamer sends the video; FEC is winject-l3's (winject-fec, below).
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 6089e8a047f9a8fdd9c35b7ffe0f3b25d238f36a
+    GIT_TAG 36d41958cdfa0c892cf73a984856250b4f9426cc
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono
@@ -53,9 +52,13 @@ foreach(dep winject_l3 winject_sdio_proxy vstreamer krono sys_applet)
     endif()
 endforeach()
 include(${winject_sdio_proxy_SOURCE_DIR}/cmake/winject_sdio_proxy.cmake)
+# winject-fec, the FEC behind winject-l3's upstreams, at l3's pin (checked there).
+set(WINJECT_FEC_PIN d30e83171a436f2bec6e9d5ed7ddb38a45dcfccb)
+include(${winject_l3_SOURCE_DIR}/cmake/WinjectFecFetch.cmake)
 
 set(EXTRA_COMPONENT_DIRS
     ${winject_l3_SOURCE_DIR}/idf/winject_l3
+    ${WINJECT_FEC_SOURCE_DIR}/idf/winject_fec
     ${winject_l3_SOURCE_DIR}/idf/app_bwtest
     ${krono_SOURCE_DIR}/idf/krono
     ${sys_applet_SOURCE_DIR}/idf/sys_applet
