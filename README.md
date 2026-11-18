@@ -70,7 +70,7 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 |----|--------|----------------|-----------------|-------------|
 | 0 | Clock sync (krono SynchClient) | named queues `synch_tx` (in) / `synch_rx` (out), L3 side on `rover_dp` | b2 / a1 | none |
 | 1 | Video (vstreamer live TX) | queues `video_tx` (in) / `video_rx` (out) | c3 / d4 | RS 6/8, 4 ms spread, 20 ms flush (vstreamer has no FEC) |
-| 2 | Bandwidth tester (app_bwtest) | named queues `bwtest_tx` / `bwtest_rx`, L3 side on `rover_dp` | f6 / e5 | RS 2/5, 20 ms flush (loss counts are after FEC) |
+| 2 | Bandwidth tester (app_bwtest) | named queues `bwtest_tx` / `bwtest_rx`, L3 side on `rover_dp` | f6 / e5 | none (clean loss counts) |
 | 3 | RC car (rover_sample): RC in, telemetry out | named queues `rc_tx` / `rc_rx`, L3 side on `rover_dp` | 17 / 28 | RS 2/5, 20 ms flush |
 | 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | RS 2/5. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
 | 5 | C6 radio m-plane | UDP static `127.0.0.1:2420` → proxy `127.0.0.1:22` | 7c / c7 | RS 2/5. The ground is UDP server on `0.0.0.0:2420` (buses c7 / 7c) |
