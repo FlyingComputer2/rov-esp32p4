@@ -70,14 +70,14 @@ Console (921600 baud): `ROVER_IP ip=…` (DHCP, hostname `rover-remote`), `ROVER
 |----|--------|----------------|-----------------|-------------|
 | 0 | Clock sync (krono SynchClient) | named queues `synch_tx` (in) / `synch_rx` (out), L3 side on `rover_dp` | b2 / a1 | none |
 | 1 | Video (vstreamer live TX) | queues `video_tx` (in) / `video_rx` (out) | c3 / d4 | RS 6/8, 4 ms spread, 20 ms flush (vstreamer has no FEC) |
-| 2 | Bandwidth tester (app_bwtest) | named queues `bwtest_tx` / `bwtest_rx`, L3 side on `rover_dp` | f6 / e5 | none |
-| 3 | RC car (rover_sample): RC in, telemetry out | named queues `rc_tx` / `rc_rx`, L3 side on `rover_dp` | 17 / 28 | none: RC repeats every 20 ms |
-| 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | none. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
-| 5 | C6 radio m-plane | UDP static `127.0.0.1:2420` → proxy `127.0.0.1:22` | 7c / c7 | none. The ground is UDP server on `0.0.0.0:2420` (buses c7 / 7c) |
-| 6 | Rover vstreamer m-plane | UDP static `127.0.0.1:5092` → vstreamer `127.0.0.1:5090` | 8d / d8 | none. The ground is UDP server on `0.0.0.0:5092` (buses d8 / 8d) |
-| 7 | Bandwidth tester m-plane | named queues `bwtest_mp_tx` / `bwtest_mp_rx`, served directly by the tester applet (its console's commands, request in, reply out) | 4b / b4 | none. The ground is UDP server on `0.0.0.0:5102` (buses b4 / 4b), one operator at a time |
-| 8 | Clock-sync m-plane | named queues `synch_mp_tx` / `synch_mp_rx`, served directly by the krono client applet | 5c / c5 | none. The ground is UDP server on `0.0.0.0:5112` (buses c5 / 5c), one operator at a time |
-| 9 | App and C6 update, config files (udp_ota) | UDP static `127.0.0.1:2430` → udp_ota `127.0.0.1:3232` | 9e / e9 | none: the tool retransmits. The ground is UDP server on `0.0.0.0:2430` (buses e9 / 9e), one client at a time |
+| 2 | Bandwidth tester (app_bwtest) | named queues `bwtest_tx` / `bwtest_rx`, L3 side on `rover_dp` | f6 / e5 | RS 2/5, 20 ms flush (loss counts are after FEC) |
+| 3 | RC car (rover_sample): RC in, telemetry out | named queues `rc_tx` / `rc_rx`, L3 side on `rover_dp` | 17 / 28 | RS 2/5, 20 ms flush |
+| 4 | L3 manager m-plane | UDP static `127.0.0.1:2410` → console `127.0.0.1:2400` | 6a / a6 | RS 2/5. The ground is UDP server on `0.0.0.0:2410` (buses a6 / 6a) |
+| 5 | C6 radio m-plane | UDP static `127.0.0.1:2420` → proxy `127.0.0.1:22` | 7c / c7 | RS 2/5. The ground is UDP server on `0.0.0.0:2420` (buses c7 / 7c) |
+| 6 | Rover vstreamer m-plane | UDP static `127.0.0.1:5092` → vstreamer `127.0.0.1:5090` | 8d / d8 | RS 2/5. The ground is UDP server on `0.0.0.0:5092` (buses d8 / 8d) |
+| 7 | Bandwidth tester m-plane | named queues `bwtest_mp_tx` / `bwtest_mp_rx`, served directly by the tester applet (its console's commands, request in, reply out) | 4b / b4 | RS 2/5. The ground is UDP server on `0.0.0.0:5102` (buses b4 / 4b), one operator at a time |
+| 8 | Clock-sync m-plane | named queues `synch_mp_tx` / `synch_mp_rx`, served directly by the krono client applet | 5c / c5 | RS 2/5. The ground is UDP server on `0.0.0.0:5112` (buses c5 / 5c), one operator at a time |
+| 9 | App and C6 update, config files (udp_ota) | UDP static `127.0.0.1:2430` → udp_ota `127.0.0.1:3232` | 9e / e9 | RS 2/5 (the tool also retransmits). The ground is UDP server on `0.0.0.0:2430` (buses e9 / 9e), one client at a time |
 
 Existing upstreams keep their ids and buses. Upstreams 7 and 8 are the tester's and the sync client's m-planes: their applets serve their consoles' commands directly on their queues (no socket in between). Like 4-6, the ground is a UDP server that replies to the last sender, so one operator at a time. Upstreams 5 to 9 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`. Update both boards together: before this layout, 7-9 went through `mplane_relay`, which prefixed a client-id byte, so a relay image and a direct image do not understand each other's 7-9 traffic.
 
@@ -209,7 +209,7 @@ MSP v2, one frame per datagram: `'$' 'X' dir flag:u8 func:u16 len:u16 payload cr
 | 0x4212 SAVE_PARAMS | < / > | | → `ok:u8` |
 | 0x4213 CMD | < / > | | `cmd:u8` (1 gyro_cal, 2 mag_cal start, 3 mag_cal stop) → `cmd:u8 rc:i8` |
 
-Every RC frame carries the whole state, so a lost one is replaced 20 ms later; there is no FEC on upstream 3. The rover follows one source and switches only after it has been silent for `failsafe_ms`. Clocks are krono-synced (rover → ground; the phone over USB channel 3), so `rc_lat_ms` is the real one-way RC latency.
+Every RC frame carries the whole state, so a lost one is replaced 20 ms later; upstream 3 also carries RS 2/5. The rover follows one source and switches only after it has been silent for `failsafe_ms`. Clocks are krono-synced (rover → ground; the phone over USB channel 3), so `rc_lat_ms` is the real one-way RC latency.
 
 ### Console (UDP 5120 on the rover)
 
