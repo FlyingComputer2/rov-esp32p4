@@ -23,7 +23,7 @@ FetchContent_Declare(bfc
 )
 FetchContent_Declare(winject_l3
     GIT_REPOSITORY https://github.com/winject-wireless/winject-l3.git
-    GIT_TAG e89c4b8d511b4898384b6c1bc118ab8a356689ba
+    GIT_TAG 1af14c513dad7dbf4dba4166825a4e1e756874fe
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
@@ -32,7 +32,7 @@ FetchContent_Declare(winject_sdio_proxy
 # vstreamer sends the video; FEC is winject-l3's (winject-fec, below).
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG a0eeb5808502cb44f445bb336f3a181b640d1a55
+    GIT_TAG 36d41958cdfa0c892cf73a984856250b4f9426cc
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono

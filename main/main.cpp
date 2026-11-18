@@ -38,6 +38,7 @@
 #include <bfc/shared_sized_buffer.hpp>
 
 #include "WinjectL3.h"
+#include "winject_fec/rs_kernel.hpp"
 #include "winject_l3/Console.h"
 #include "synch/SynchGpio.h"
 #include "core/thread_spawn.hpp"
@@ -246,6 +247,24 @@ bool start_dplane_queues()
     {
         return false;
     }
+    /* l3's FEC (upstream 1) encodes on this reactor: check the PIE kernel against the table
+     * path there first (its first use may bind the task to its core). A mismatch turns PIE
+     * off for good. */
+    cv->wake_up(
+        []
+        {
+            for (int rows : {1, 2, 10})
+            {
+                int64_t   fast_us = 0, table_us = 0;
+                const int bad = winject::fec::rs_encode_selftest(
+                    21, rows, 1403, 2, [] { return int64_t(esp_timer_get_time()); }, &fast_us,
+                    &table_us);
+                printf("ROVER_RS_SELFTEST rows=%d mismatches=%d backend=%s fast_us=%lld "
+                       "table_us=%lld\n",
+                       rows, bad, winject::fec::rs_encode_scalar_impl(), (long long)fast_us,
+                       (long long)table_us);
+            }
+        });
     vstreamer::spawn_thread(k_dp_reactor_thread, [cv] { cv->run(); }).detach();
     return true;
 }
@@ -383,9 +402,9 @@ bool sum_link_rx(const winject::L3& l3, uint64_t* bytes, uint64_t* packets, uint
         {
             continue;
         }
-        const bool fec = s.value.fec_packets > 0;
-        *bytes += fec ? s.value.fec_bytes : s.value.bytes;
-        *packets += fec ? s.value.fec_packets : s.value.packets;
+        /* Every slot from the air, plain and FEC, before recovery. */
+        *bytes += s.value.air_bytes;
+        *packets += s.value.air_packets;
         *lost += s.value.air_gap;
     }
     return true;
