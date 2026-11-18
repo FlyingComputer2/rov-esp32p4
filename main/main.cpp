@@ -148,17 +148,14 @@ constexpr size_t k_video_rx_capacity = 16;
  * core 0 ran out of time above ~8 Mbit/s. */
 constexpr vstreamer::thread_opts k_dp_reactor_thread {"rover_dp", 8 * 1024, 1, 14};
 
-/* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING,
- * no FEC there; the GS delivers it to its receiver). vstreamer's RS FEC
- * protects the stream end to end; datagrams must stay within winject-l3's
- * 1445-byte application limit, which the payloader's 1400-byte mtu (live TX
- * default) keeps them under. Bench over the air (C6 -> RTL8812AU): on
- * channel 13 (~7% isolated frame loss) 6 Mbit/s with FEC 21/31 and 75 ms
- * spread gave 0-0.7% residual loss at 22-27 fps, 10/12 left 3.8% (3.6 fps)
- * and 15/31 ran core 0 out of time; on channel 1 (~1% loss) every FEC tried
- * was clean. Bitrate (src bitrate, kbit/s), FEC and spread can be changed at run time
- * on the vstreamer m-plane (UDP 5090), where `set tx pause 1` / `0` also
- * pauses and resumes live TX. */
+/* Video into winject-l3's upstream 1 (config/winject.conf: QUEUE_FORWARDING with
+ * FEC 6/8, 4 ms spread; the GS delivers it to its receiver). vstreamer has no FEC
+ * of its own: each RTP packet goes out once, with a 3-byte sequence header, and l3
+ * protects it on the air. Datagrams must stay within l3's 1438-byte FEC limit,
+ * which the payloader's 1400-byte mtu (live TX default) keeps them under. Bitrate
+ * (src bitrate, kbit/s) can be changed at run time on the vstreamer m-plane (UDP
+ * 5090), where `set tx pause 1` / `0` also pauses and resumes live TX; FEC is set
+ * on the l3 console (`uu id=1 k= n= fec_spread=`). */
 constexpr int k_video_mplane_port = 5090;
 
 /* The applets' upstreams (config/winject.conf): QUEUE_FORWARDING on named
@@ -624,9 +621,7 @@ vstreamer::idf::live_tx_config video_config()
     cfg.mplane_reactor = k_apps_reactor;
     cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
-    /* In order: fec_k before fec_n, since k may not exceed the current n (sender starts at
-     * k=10, n=12). */
-    cfg.snd = {{"fec", "block"}, {"fec_k", "6"}, {"fec_n", "8"}, {"fec_spread_ms", "4"}};
+    /* No sender keys: FEC is l3's (upstream 1). */
     return cfg;
 }
 
