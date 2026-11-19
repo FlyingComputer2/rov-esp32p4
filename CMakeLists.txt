@@ -32,7 +32,7 @@ FetchContent_Declare(winject_sdio_proxy
 # vstreamer sends the video; FEC is winject-l3's (winject-fec, below).
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 39707640910b759eb68318df428294478be5c8ba
+    GIT_TAG 07ef91818a25afeb5d83a1a27215e14a7c96b294
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono
