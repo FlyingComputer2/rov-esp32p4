@@ -330,6 +330,11 @@ esp_err_t mount_config()
  * restart. */
 std::atomic<bool> g_video_pause {false};
 
+/* Local recording of the coded video to the TF card (live_tx_config::record):
+ * `set rec on 1|0` on the vstreamer m-plane (from the ground, UDP 5092). Off at
+ * boot; owned here like the pause. */
+std::atomic<bool> g_video_record {false};
+
 /* udp_ota's on_ota_active. Video pauses while an image comes in (it would
  * take most of the airtime) or the C6 is written (its radio stalls on every
  * flash write), and goes back to what it was afterwards. */
@@ -644,6 +649,12 @@ vstreamer::idf::live_tx_config video_config()
     cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
     /* No sender keys: FEC is l3's (upstream 1). */
+    /* The encoder's AUs, teed to Matroska on the card: /sdcard/rec/rov_NNNN-NNN.mkv.
+     * No card, no recorder (`set rec on` answers ENODEV). */
+    if (rover_sd::mounted())
+    {
+        cfg.rec_output = std::string(rover_sd::k_mount_point) + "/rec/rov.mkv";
+    }
     return cfg;
 }
 
@@ -651,6 +662,7 @@ void run_video()
 {
     vstreamer::idf::live_tx_config cfg = video_config();
     cfg.pause = &g_video_pause;
+    cfg.record = &g_video_record;
     for (;;)
     {
         const int rc = vstreamer::idf::run_live_tx(cfg);
