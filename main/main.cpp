@@ -649,11 +649,13 @@ vstreamer::idf::live_tx_config video_config()
     cfg.src = {{"buffers", "3"}, {"fps", "30"},    {"bitrate", "6000"},
                {"gop", "30"},    {"qp_min", "20"}, {"qp_max", "51"}};
     /* No sender keys: FEC is l3's (upstream 1). */
-    /* The encoder's AUs, teed to Matroska on the card: /sdcard/rec/rov_NNNN-NNN.mkv.
-     * No card, no recorder (`set rec on` answers ENODEV). */
+    /* The encoder's AUs, teed to Matroska on the card: /sdcard/rec/rov_NNNN-NNN.mkv; and
+     * one-shot JPEG photos (`set photo take 1`): /sdcard/photo/rov_NNNN.jpg. No card, no
+     * recorder or photos (`set rec on` / `set photo take` answer ENODEV). */
     if (rover_sd::mounted())
     {
         cfg.rec_output = std::string(rover_sd::k_mount_point) + "/rec/rov.mkv";
+        cfg.photo_output = std::string(rover_sd::k_mount_point) + "/photo/rov.jpg";
     }
     return cfg;
 }
