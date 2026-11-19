@@ -2,9 +2,9 @@ if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
     set(ROVER_WDT_DEP esp_hal_wdt)
 endif()
 
-idf_component_register(SRCS "main.cpp"
+idf_component_register(SRCS "main.cpp" "sd_card.cpp"
                        PRIV_REQUIRES winject_l3 app_bwtest krono winject_proxy vstreamer rover_sample applets sys_applet esp_driver_gpio esp_driver_i2c esp_eth esp_netif esp_event esp_timer vfs
-                                     nvs_flash spiffs pthread ${ROVER_WDT_DEP})
+                                     nvs_flash spiffs fatfs sdmmc esp_driver_sdmmc esp_hw_support pthread ${ROVER_WDT_DEP})
 # bfc (the d-plane queues) throws on fatal errors; with IDF's C++ exceptions
 # off a throw aborts.
 target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fexceptions>)

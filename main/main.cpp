@@ -65,6 +65,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "board_pins.hpp"
+#include "sd_card.hpp"
 #include "rover_sample/rover_sample.hpp"
 #include "sys_applet/applet.hpp"
 #include "vstreamer_idf/live_tx.hpp"
@@ -488,6 +489,8 @@ void start_applets()
     sy.mplane_from_l3 = k_sys_mplane_up.names.from_l3;
     sy.reactor = k_apps_reactor;
     sy.console = k_sys_console;
+    /* `get sys sd`: TF card state (rover_sd::mount ran before the applets). */
+    sys.add_query("sd", [] { return rover_sd::status_line(); });
     if (!sys.configure(sy) || !sys.start())
     {
         printf("ROVER_SYS_EXIT rc=1\n");
@@ -813,6 +816,10 @@ extern "C" void app_main(void)
     {
         printf("ROVER_PROXY_FAILED err=0x%x\n", err);
     }
+
+    /* TF card at /sdcard (FAT, formatted if it does not mount). After the
+     * proxy: it brings up the SDMMC host that slot 0 shares with the C6. */
+    rover_sd::mount();
 
     /* Before video: the camera source adopts this bus. */
     err = start_board_i2c();
