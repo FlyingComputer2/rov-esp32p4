@@ -51,3 +51,7 @@ CONFIG_ESP_VIDEO_USE_CUSTOMIZED_ESP_H264_VERSION=y
 # TF card (/sdcard, see main/sd_card.hpp): long file names, buffers on the heap.
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
+# VFS entries: /dev/null, console, UART, USB-JTAG, lwIP sockets, /winject,
+# esp_video's /dev/video* devices and /sdcard; 8 left the last video device
+# without one (live TX failed to open the camera).
+CONFIG_VFS_MAX_COUNT=16
