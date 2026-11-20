@@ -4,7 +4,8 @@
 # Local checkouts: -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=<dir>,
 # -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY=<dir>,
 # -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=<dir>, -DFETCHCONTENT_SOURCE_DIR_KRONO=<dir>,
-# -DFETCHCONTENT_SOURCE_DIR_SYS_APPLET=<dir>, -DFETCHCONTENT_SOURCE_DIR_WINJECT_FEC=<dir>.
+# -DFETCHCONTENT_SOURCE_DIR_SYS_APPLET=<dir>, -DFETCHCONTENT_SOURCE_DIR_WINJECT_FEC=<dir>,
+# -DFETCHCONTENT_SOURCE_DIR_UDPFS=<dir>.
 cmake_minimum_required(VERSION 3.16)
 if(NOT DEFINED PROJECT_VER)
     set(PROJECT_VER "0.1.0")
@@ -32,7 +33,7 @@ FetchContent_Declare(winject_sdio_proxy
 # vstreamer sends the video; FEC is winject-l3's (winject-fec, below).
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 07ef91818a25afeb5d83a1a27215e14a7c96b294
+    GIT_TAG 34a689b1a805356c699c1dcab7633a05b3653481
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono
@@ -43,9 +44,16 @@ FetchContent_Declare(krono
 # upstream 10). It uses this firmware's bfc and pins none.
 FetchContent_Declare(sys_applet
     GIT_REPOSITORY https://github.com/FlyingComputer2/sys-applet-esp32p4.git
-    GIT_TAG 00c16e1fe60f359a7f25eb68839de60d2fa16f65
+    GIT_TAG 0273c8de45ff37668631f12dcccf2a24aaa19ec6
 )
-foreach(dep winject_l3 winject_sdio_proxy vstreamer krono sys_applet)
+# Remote file access (udpfs: upstream 11, UDP 2440). It uses this firmware's
+# bfc and pins none; udpfs_config/ is this firmware's errno / flag map.
+FetchContent_Declare(udpfs
+    GIT_REPOSITORY https://github.com/FlyingComputer2/udpfs.git
+    GIT_TAG f755977a1400ecd9a7e59266f990ddd7b9299e3e
+)
+set(UDPFS_CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/udpfs_config)
+foreach(dep winject_l3 winject_sdio_proxy vstreamer krono sys_applet udpfs)
     FetchContent_GetProperties(${dep})
     if(NOT ${dep}_POPULATED)
         FetchContent_Populate(${dep})
@@ -62,6 +70,7 @@ set(EXTRA_COMPONENT_DIRS
     ${winject_l3_SOURCE_DIR}/idf/app_bwtest
     ${krono_SOURCE_DIR}/idf/krono
     ${sys_applet_SOURCE_DIR}/idf/sys_applet
+    ${udpfs_SOURCE_DIR}/idf/udpfs
     ${vstreamer_SOURCE_DIR}/idf/vstreamer
     ${WINJECT_SDIO_PROXY_COMPONENT_DIRS})
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

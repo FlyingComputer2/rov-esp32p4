@@ -78,7 +78,8 @@ uses the existing handle (`config::pin::i2c_port`).
 | 0, 1 | 23, 22 | 32.768 kHz crystal (0R R29 / R33) |
 | 24, 25 | 27, 28 | USB1.1 Type-C = USB-Serial-JTAG (also on the header through 0R R105 / R106) |
 | 32, 33 | 26, 29 | C6 UART (flash bridge wiring) |
-| 45 | 40 | TF card power switch (Q1 gate) |
+| 39–44 | — | TF card, SDMMC slot 0 (D0–D3 39–42, CLK 43, CMD 44), `main/sd_card.cpp` |
+| 45 | 40 | TF card power switch (Q1 gate), driven low (on) by `main/sd_card.cpp` |
 | 51 | — | Ethernet PHY reset (IP101) |
 | 54 | C6 `CHIP_PU` | SDIO proxy default |
 
