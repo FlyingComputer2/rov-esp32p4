@@ -37,6 +37,7 @@ struct pins
     int bts_l_is = 23;
     /** VBUS sense ADC GPIO (any ADC unit); -1 disables. */
     int vbus_adc = -1;
+    int binary_out = -1;
 };
 
 struct config
@@ -47,6 +48,7 @@ struct config
     std::string link_to_l3;
     std::string link_from_l3;
     pins pin;
+    std::function<void()> request_photo;  // called on the apps reactor
     // The reactor (bfc::default_reactor_registry) the RC link and the console
     // run on; start() registers on it before its thread runs.
     std::string reactor;

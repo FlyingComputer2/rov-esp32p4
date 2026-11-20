@@ -27,15 +27,17 @@ constexpr gpio_num_t k_bts_en = GPIO_NUM_6;     // R_EN, header pin 15 (10k pull
 constexpr gpio_num_t k_bts_l_en = GPIO_NUM_21;  // L_EN, header pin 11 (10k pulldown), same signal
 // Current sense: not wired on this car. Unconnected pins float, and a floating IS
 // reading trips the 4 V overload fault. To use it, wire R_IS / L_IS through the
-// divider to ADC1 pins (GPIO23, header 7, is free; GPIO21 is now L_EN) and set them here.
+// divider to ADC1 pins (GPIO23 is the binary output and GPIO21 is L_EN) and set them here.
 constexpr gpio_num_t k_bts_r_is = GPIO_NUM_NC;
 constexpr gpio_num_t k_bts_l_is = GPIO_NUM_NC;
+
+constexpr gpio_num_t k_binary_out = GPIO_NUM_23;  // header pin 7
 
 // --- VBUS / battery divider (high side to VBUS, tap to the pin, low side to GND) ---
 // GPIO53 = ADC2 ch4, header pin 35. On this board it is also PA_CTRL (0R R73 into
 // the speaker amp's 74LVC1G08 enable gate): a high-Z input, so the reading is
 // fine, but the amp may sit enabled (silent) while the bus is up. The only other
-// ADC pins on the header are 20 (krono), 21/23 (BTS IS) and 22 (LED).
+// ADC pins on the header are 20 (krono), 21 (BTS L_EN), 23 (binary output) and 22 (LED).
 constexpr gpio_num_t k_vbus_sense = GPIO_NUM_53;
 
 /**
@@ -85,6 +87,7 @@ inline rover_sample::pins actuator_pins()
     p.bts_l_en = static_cast<int>(k_bts_l_en);
     p.bts_r_is = static_cast<int>(k_bts_r_is);
     p.bts_l_is = static_cast<int>(k_bts_l_is);
+    p.binary_out = k_binary_out;
     p.vbus_adc = static_cast<int>(k_vbus_sense);
     return p;
 }

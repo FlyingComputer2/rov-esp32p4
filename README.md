@@ -23,9 +23,9 @@ The GS side is [gnd-esp32p4](https://github.com/FlyingComputer2/gnd-esp32p4): wi
 All three come in with CMake FetchContent at pinned commits (top-level `CMakeLists.txt`). All three fetch bfc under one FetchContent name and must use the same bfc (they share its registries); the top-level `CMakeLists.txt` declares it first, so it wins, and its pin should stay equal to theirs. vstreamer and winject-l3 also share ISA-L, so bump their pins together. To build against local checkouts:
 
 ```bash
-idf.py -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3=~/development/winject-l3 \
-       -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY=~/development/winject-radio-esp32-sdio-proxy \
-       -DFETCHCONTENT_SOURCE_DIR_VSTREAMER=~/development/vstreamer build
+idf.py -DFETCHCONTENT_SOURCE_DIR_WINJECT_L3="$HOME/development/winject-l3" \
+       -DFETCHCONTENT_SOURCE_DIR_WINJECT_SDIO_PROXY="$HOME/development/winject-radio-esp32-sdio-proxy" \
+       -DFETCHCONTENT_SOURCE_DIR_VSTREAMER="$HOME/development/vstreamer" build
 ```
 
 ## Build and flash
@@ -191,6 +191,7 @@ Full pin budget, LEDC mapping, reserved GPIOs, and bring-up notes:
 | BTS7960 R_EN | 6 | 15 | 10 k pull-down to GND so a P4 reset coasts |
 | BTS7960 L_EN | 21 | 11 | Separate wire, same signal as R_EN (`bts_l_en`); own 10 k pull-down. Deadman pulls both low |
 | BTS7960 R_IS / L_IS | — | — | **Not wired; disabled in `board_pins.hpp`** (current reads 0, no IS overload fault). To use: ADC1 pins through a divider (IS reaches ~5 V), ratio in `is_div` |
+| CRSF CH10 binary output | 23 | 7 | Active-high 3.3 V logic, low on RC timeout |
 | VBUS sense | 53 | 35 | ADC2, divider from the pack / BEC; ratio in `vbus_div` (default 12). Also the board's speaker-amp PA_CTRL (high-Z gate input) |
 | 3V3 / 5V / GND | | 1, 17 / 2, 4 / 6, 9, 14, 20, 25, 30, 34, 39 | |
 
@@ -210,12 +211,29 @@ MSP v2, one frame per datagram: `'$' 'X' dir flag:u8 func:u16 len:u16 payload cr
 
 | func | dir | Rate | Payload |
 |------|-----|------|---------|
-| 0x4201 RC | < | 50 Hz | `seq:u16 t_us:u32 src:u8 flags:u8 mode:u8 steer:i16 thr:i16 aux:i16 aux2:i16` (17 B; the older 15 B frame without `aux2` is still accepted, aux2 = 0). steer / thr / aux / aux2 -1000..1000 (+ = right / forward), aux = CH2, aux2 = CH3; flags bit 0 = arm; mode 255 = rover default; src 1 phone, 2 UDP, 3 console; t_us = sender `CLOCK_REALTIME` µs, low 32 bits |
+| 0x4201 RC | < | 50 Hz | `seq:u16 t_us:u32 src:u8 flags:u8 mode:u8 steer:i16 thr:i16 aux:i16 aux2:i16` (17 B; the older 15 B frame without `aux2` is still accepted, aux2 = 0). steer / thr / aux / aux2 -1000..1000 (+ = right / forward), aux = CH2, aux2 = CH3; flags bit 0 = arm, bit 1 = photo switch high, bit 2 = binary output high, bit 3 = photo switch held in CLI (inhibits a trigger on exit); mode 255 = rover default; src 1 phone, 2 UDP, 3 console; t_us = sender `CLOCK_REALTIME` µs, low 32 bits |
 | 0x4220 TELEM | > | `telem_hz` (20) | `seq:u16 t_us:u32 rc_seq:u16 rc_age_ms:u16 state:u8 mode:u8 r_cmd:i16 r_meas:i16 steer_out:i16 thr_out:i16 heading:u16 roll:i16 pitch:i16 ax:i16 ay:i16 v_est:u16 i_motor:u16 rc_loss:u16 rc_lat_ms:u16 flags:u8 vbus:u16 rssi:i8 link_ms:u32 link_rx_bytes:u32 link_rx_packets:u32 link_rx_lost:u32` (58 B; older rovers send the first 42 or 39 B). Rates 0.1 dps, outputs ‰, angles 0.01°, accel mg, v cm/s, current 10 mA, loss ‰ and latency p50 over the last second; vbus 10 mV (0 = no sense); rssi = dBm of the ground's frames at this C6 (`radio_info`, polled at 2 Hz by `main`; 0 = unknown); link_* = the ground → rover air link as this rover's L3 receives it, summed over all upstreams, free-running and sampled at 2 Hz by `main` at `link_ms` (rover monotonic ms): air bytes and frames (FEC wire on FEC upstreams) and frames missing from the upstream sequences (`air_gap`); rates and loss come from two samples' difference (all 0 = unknown). state 0 disarmed, 1 armed, 2 failsafe, 3 fault; flags: 0x01 imu ok, 0x02 mag ok, 0x04 gyro calibrated, 0x08 BTS enabled, 0x10 deadman, 0x20 IMU lost (direct), 0x40 braking |
 | 0x4210 GET_PARAM | < / > | | `id:u8` → `id:u8 value:f32` |
 | 0x4211 SET_PARAM | < / > | | `id:u8 value:f32` → the applied (clamped) value |
 | 0x4212 SAVE_PARAMS | < / > | | → `ok:u8` |
 | 0x4213 CMD | < / > | | `cmd:u8` (1 gyro_cal, 2 mag_cal start, 3 mag_cal stop) → `cmd:u8 rc:i8` |
+
+### EdgeTX CRSF channel map
+
+| CRSF input | Rover function | Output or switch behavior |
+|---|---|---|
+| CH1–2 | Unassigned | |
+| CH3 | Throttle and brake/reverse | BTS7960 bridge |
+| CH4 | Steering | Servo CH1, GPIO3 |
+| CH5 | Arm request | ≥ 1750 µs in CH5 mode. EdgeTX Switch arming mode uses the CRSF status bit. |
+| CH6 | Steering mode | ≤ 1250 µs manual, ≥ 1750 µs rate, otherwise the rover's `mode` parameter |
+| CH7 | Auxiliary servo 1 | Servo CH2, GPIO2 |
+| CH8 | Auxiliary servo 2 | Servo CH3, GPIO26 |
+| CH9 | Take a JPEG on the rover | Momentary switch. A rising edge to ≥ 1750 µs requests one photo on the mounted TF card. |
+| CH10 | Binary output | Maintained switch. ≥ 1750 µs drives GPIO23 (header pin 7) high. |
+| CH11–16 | Unassigned | |
+
+Mix the switches onto CH9 and CH10 in the active EdgeTX model. Both work while disarmed in RC mode. The first frame after connection or RC timeout establishes the shutter position. A held shutter cannot repeat. CLI hold suppresses capture and drops the binary output low, as does loss of fresh RC. The camera's existing `get photo file` and `get photo stats` commands report capture results.
 
 Every RC frame carries the whole state, so a lost one is replaced 20 ms later; upstream 3 also carries RS 2/5. The rover follows one source and switches only after it has been silent for `failsafe_ms`. Clocks are krono-synced (rover → ground; the phone over USB channel 3), so `rc_lat_ms` is the real one-way RC latency.
 

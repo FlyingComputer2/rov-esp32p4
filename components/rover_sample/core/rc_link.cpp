@@ -9,8 +9,13 @@ namespace
 constexpr size_t k_lat_samples = 64;
 }
 
-bool rc_link::accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uint32_t failsafe_ms)
+bool rc_link::accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uint32_t failsafe_ms,
+                     bool* photo_pressed)
 {
+    if (photo_pressed)
+    {
+        *photo_pressed = false;
+    }
     if (have_ && rc.src != last_.src && now_us - last_us_ < int64_t(failsafe_ms) * 1000)
     {
         ++rejected_;
@@ -26,6 +31,11 @@ bool rc_link::accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uin
         {
             ++rejected_;  // duplicate or reordered
             return false;
+        }
+        if (photo_pressed)
+        {
+            const bool was_high = last_.flags & (k_rc_flag_photo | k_rc_flag_photo_held_in_cli);
+            *photo_pressed = !was_high && (rc.flags & k_rc_flag_photo);
         }
         win_span_ += d;
     }
