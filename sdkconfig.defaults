@@ -12,10 +12,14 @@ CONFIG_ETH_USE_ESP32_EMAC=y
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_SO_RCVBUF=y
-# Proxy (UDP 22, 9000, HTTP server) + winject-l3 (radio console and d-plane,
-# manager console, 3 upstreams, 2 for its reactor's wake pipe) + vstreamer live
-# TX (stream_sender, management plane).
-CONFIG_LWIP_MAX_SOCKETS=28
+# Sockets and UDP PCBs: the proxy (udp_ota, C6 m-plane), winject-l3 (radio
+# console, manager console, its UDP upstreams 4/5/6/9), the consoles (bwtest,
+# synch, rover_sample, sys, vstreamer m-plane), udpfs (UDP 2440), DHCP, and two
+# UDP sockets per bfc poll reactor for its wake "pipe" (apps, udpfs, l3). At 16
+# UDP PCBs, adding udpfs left winject-l3 unable to bind its upstreams: the
+# rover booted off the air. Keep headroom.
+CONFIG_LWIP_MAX_SOCKETS=32
+CONFIG_LWIP_MAX_UDP_PCBS=32
 
 # Two app slots for POST /update/p4 with rollback (as the proxy's app), plus
 # a SPIFFS partition holding /winject/winject.conf.

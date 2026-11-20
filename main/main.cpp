@@ -68,6 +68,7 @@
 #include "sd_card.hpp"
 #include "rover_sample/rover_sample.hpp"
 #include "sys_applet/applet.hpp"
+#include "udpfs_idf/service.hpp"
 #include "vstreamer_idf/live_tx.hpp"
 #include "winject_proxy.h"
 
@@ -170,6 +171,7 @@ constexpr int k_video_mplane_port = 5090;
  *   7 tester m-plane                   bwtest_mp_tx / bwtest_mp_rx
  *   8 clock-sync m-plane               synch_mp_tx / synch_mp_rx
  *  10 system m-plane (sys_applet)      sys_mp_tx / sys_mp_rx
+ *  11 remote files (udpfs)             udpfs_tx / udpfs_rx
  * 7 and 8 serve the same commands as the UDP consoles; the ground is a
  * udp_server on 5102 / 5112 (replies to the last sender, one operator at a
  * time). */
@@ -184,6 +186,9 @@ const app_upstream k_rc_up {{"rc_tx", "rc_rx"}, 16};
 const app_upstream k_bwtest_mplane_up {{"bwtest_mp_tx", "bwtest_mp_rx"}, 16};
 const app_upstream k_synch_mplane_up {{"synch_mp_tx", "synch_mp_rx"}, 16};
 const app_upstream k_sys_mplane_up {{"sys_mp_tx", "sys_mp_rx"}, 16};
+/* A client keeps a window of requests in flight (8 by default) and resends;
+ * room for several windows while a card write holds the udpfs thread. */
+const app_upstream k_udpfs_up {{"udpfs_tx", "udpfs_rx"}, 64};
 
 constexpr const char* k_bwtest_console = "0.0.0.0:5100";
 
@@ -196,6 +201,12 @@ constexpr int k_synch_pulse_gpio = 20;
 /* The system applet (get sys cpu / heap / stack / uptime / reset / version): UDP console
  * 5130; its m-plane is upstream 10 (over the air: ground UDP 5132). */
 constexpr const char* k_sys_console = "0.0.0.0:5130";
+
+/* udpfs (FlyingComputer2/udpfs): remote file access as root on every mounted
+ * filesystem (/sdcard, /winject), over upstream 11 (from the ground: UDP 2440)
+ * and on UDP 2440 here (Ethernet). Its own reactor and thread, on an internal
+ * stack since /winject is SPIFFS (flash access turns the cache off). */
+constexpr const char* k_udpfs_udp = "0.0.0.0:2440";
 
 /* rover_sample: its sensors share the board I2C with the camera SCCB and the
  * codec: GPIO7 SDA / GPIO8 SCL (header pins 3 / 5, ESP_I2C_SDA / _SCL), board
@@ -244,7 +255,8 @@ bool start_dplane_queues()
         !register_queue(k_video_rx, k_video_rx_capacity) ||
         !register_app_upstream(k_synch_up) || !register_app_upstream(k_bwtest_up) ||
         !register_app_upstream(k_rc_up) || !register_app_upstream(k_bwtest_mplane_up) ||
-        !register_app_upstream(k_synch_mplane_up) || !register_app_upstream(k_sys_mplane_up))
+        !register_app_upstream(k_synch_mplane_up) || !register_app_upstream(k_sys_mplane_up) ||
+        !register_app_upstream(k_udpfs_up))
     {
         return false;
     }
@@ -496,6 +508,22 @@ void start_applets()
     sy.console = k_sys_console;
     /* `get sys sd`: TF card state (rover_sd::mount ran before the applets). */
     sys.add_query("sd", [] { return rover_sd::status_line(); });
+
+    /* Started here, early: its internal-RAM stack is taken before video
+     * fragments internal RAM. Priority 5 on core 1: below the applets (10),
+     * L3 and video; a busy transfer only waits for them. */
+    static udpfs_idf::service files;
+    udpfs_idf::config fc;
+    fc.to_l3 = k_udpfs_up.names.to_l3;
+    fc.from_l3 = k_udpfs_up.names.from_l3;
+    fc.udp = k_udpfs_udp;
+    fc.core = 1;
+    fc.prio = 5;
+    if (!files.start(fc))
+    {
+        printf("ROVER_UDPFS_EXIT rc=1\n");
+    }
+    sys.add_query("udpfs", [] { return files.stats_line(); });
     if (!sys.configure(sy) || !sys.start())
     {
         printf("ROVER_SYS_EXIT rc=1\n");

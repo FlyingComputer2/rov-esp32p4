@@ -168,7 +168,8 @@ esp_err_t mount()
 
     esp_vfs_fat_sdmmc_mount_config_t mcfg = {};
     mcfg.format_if_mount_failed = true;
-    mcfg.max_files = 4;
+    /* The MKV recorder, a photo and udpfs (up to 4 handles) at once. */
+    mcfg.max_files = 8;
     mcfg.allocation_unit_size = 64 * 1024;
 
     sdmmc_card_t* card = nullptr;

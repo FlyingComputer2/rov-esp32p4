@@ -70,7 +70,7 @@ Console (921600 baud): `ROVER_SD …` / `ROVER_SD_FAILED …` at boot, `ROVER_IP
 
 ## Config
 
-[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 11 dBm, domain 0xB00B), manager console on UDP 2400, and ten upstreams. The ground P4 carries the same ten, buses swapped. Buses belong to the flow, not the index:
+[`config/winject.conf`](config/winject.conf): radio m-plane on loopback and d-plane on queues (channel 1, OFDM_24M, 11 dBm, domain 0xB00B), manager console on UDP 2400, and twelve upstreams (0-11). The ground P4 carries the same twelve, buses swapped. Buses belong to the flow, not the index:
 
 | id | Stream | Rover endpoint | Buses (tx / rx) | Manager FEC |
 |----|--------|----------------|-----------------|-------------|
@@ -84,6 +84,8 @@ Console (921600 baud): `ROVER_SD …` / `ROVER_SD_FAILED …` at boot, `ROVER_IP
 | 7 | Bandwidth tester m-plane | named queues `bwtest_mp_tx` / `bwtest_mp_rx`, served directly by the tester applet (its console's commands, request in, reply out) | 4b / b4 | RS 2/5. The ground is UDP server on `0.0.0.0:5102` (buses b4 / 4b), one operator at a time |
 | 8 | Clock-sync m-plane | named queues `synch_mp_tx` / `synch_mp_rx`, served directly by the krono client applet | 5c / c5 | RS 2/5. The ground is UDP server on `0.0.0.0:5112` (buses c5 / 5c), one operator at a time |
 | 9 | App and C6 update, config files (udp_ota) | UDP static `127.0.0.1:2430` → udp_ota `127.0.0.1:3232` | 9e / e9 | RS 2/5 (the tool also retransmits). The ground is UDP server on `0.0.0.0:2430` (buses e9 / 9e), one client at a time |
+| 10 | System m-plane (sys applet) | named queues `sys_mp_tx` / `sys_mp_rx`, served by the sys applet (`get sys cpu\|heap\|stack\|uptime\|reset\|version\|sd\|udpfs`) | 3f / f3 | RS 2/5. The ground is UDP server on `0.0.0.0:5132` |
+| 11 | Remote files ([udpfs](https://github.com/FlyingComputer2/udpfs)) | named queues `udpfs_tx` / `udpfs_rx`, served by the udpfs service (its own reactor and thread, internal stack; also UDP 2440 on this board) | 1b / b1 | none (every request is safe to resend; the client resends). The ground is UDP server on `0.0.0.0:2440`, one client at a time: `udpfs get <ground>:/sdcard/photo/rov_0001.jpg .`, `udpfs put winject.conf <ground>:/winject/winject.conf`. Root on `/sdcard` and `/winject`, no authentication |
 
 Existing upstreams keep their ids and buses. Upstreams 7 and 8 are the tester's and the sync client's m-planes: their applets serve their consoles' commands directly on their queues (no socket in between). Like 4-6, the ground is a UDP server that replies to the last sender, so one operator at a time. Upstreams 5 to 9 only pair when both boards run this layout; an older image counts their frames as `rx_drop_bus`. Update both boards together: before this layout, 7-9 went through `mplane_relay`, which prefixed a client-id byte, so a relay image and a direct image do not understand each other's 7-9 traffic.
 
