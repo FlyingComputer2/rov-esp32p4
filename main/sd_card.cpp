@@ -5,10 +5,15 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <cerrno>
+#include <thread>
+
 #include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
 #include "esp_heap_caps.h"
 #include "esp_ldo_regulator.h"
+#include "esp_pthread.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
@@ -38,6 +43,40 @@ constexpr size_t k_test_bytes = 1024 * 1024;
 
 sdmmc_card_t* s_card = nullptr;
 int s_attempts = 0;
+
+/* format_card(): 0 idle, 1 running, 2 ok, 3 failed. */
+std::atomic<int> s_fmt_state {0};
+esp_err_t s_fmt_err = ESP_OK;
+int64_t s_fmt_ms = 0;
+
+sdmmc_host_t make_host(int freq_khz)
+{
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.slot = SDMMC_HOST_SLOT_0;
+    host.max_freq_khz = freq_khz;
+    return host;
+}
+
+/* Slot 0 is IO MUX only: the pins are fixed (CLK 43, CMD 44, D0-D3 39-42). */
+sdmmc_slot_config_t make_slot()
+{
+    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot.width = 4;
+    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+    return slot;
+}
+
+esp_vfs_fat_sdmmc_mount_config_t make_mount_cfg(bool format)
+{
+    esp_vfs_fat_sdmmc_mount_config_t mcfg = {};
+    /* Only format_card() formats: the card holds recordings and photos, and a
+     * glitch that looks like a missing filesystem must not erase them. */
+    mcfg.format_if_mount_failed = format;
+    /* The MKV recorder, a photo and udpfs (up to 4 handles) at once. */
+    mcfg.max_files = 8;
+    mcfg.allocation_unit_size = 64 * 1024;
+    return mcfg;
+}
 esp_ldo_channel_handle_t s_ldo = nullptr;
 
 /* Written once by mount() (app_main), read by status_line() afterwards. */
@@ -172,23 +211,9 @@ esp_err_t mount()
         return err;
     }
 
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.slot = SDMMC_HOST_SLOT_0;
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-
-    /* Slot 0 is IO MUX only: the pins are fixed (CLK 43, CMD 44, D0-D3 39-42). */
-    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot.width = 4;
-    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-
-    esp_vfs_fat_sdmmc_mount_config_t mcfg = {};
-    /* Never format: the card holds recordings and photos, and a glitch that
-     * looks like a missing filesystem must not erase them. A new card is
-     * formatted FAT32 on a PC (exFAT is not built in). */
-    mcfg.format_if_mount_failed = false;
-    /* The MKV recorder, a photo and udpfs (up to 4 handles) at once. */
-    mcfg.max_files = 8;
-    mcfg.allocation_unit_size = 64 * 1024;
+    sdmmc_host_t host = make_host(SDMMC_FREQ_HIGHSPEED);
+    const sdmmc_slot_config_t slot = make_slot();
+    const esp_vfs_fat_sdmmc_mount_config_t mcfg = make_mount_cfg(false);
 
     sdmmc_card_t* card = nullptr;
     for (s_attempts = 1; s_attempts <= k_mount_attempts; ++s_attempts)
@@ -222,6 +247,85 @@ esp_err_t mount()
     return ESP_OK;
 }
 
+int format_card()
+{
+    int expected = s_fmt_state.load();
+    do
+    {
+        if (expected == 1)
+        {
+            return -EALREADY;
+        }
+    } while (!s_fmt_state.compare_exchange_weak(expected, 1));
+
+    esp_pthread_cfg_t tc = esp_pthread_get_default_config();
+    esp_pthread_cfg_t prev {};
+    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
+    tc.thread_name = "sd_format";
+    tc.stack_size = 8 * 1024;
+    tc.prio = 4;
+    tc.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT; /* SDMMC: the cache stays on */
+    esp_pthread_set_cfg(&tc);
+    std::thread([] {
+        printf("ROVER_SD_FORMAT start mounted=%d\n", s_card != nullptr);
+        fflush(stdout);
+        const int64_t t0 = esp_timer_get_time();
+        esp_err_t err = ESP_OK;
+        esp_vfs_fat_sdmmc_mount_config_t mcfg = make_mount_cfg(true);
+        if (s_card)
+        {
+            err = esp_vfs_fat_sdcard_format_cfg(k_mount_point, s_card, &mcfg);
+        }
+        else
+        {
+            sdmmc_host_t host = make_host(SDMMC_FREQ_DEFAULT);
+            const sdmmc_slot_config_t slot = make_slot();
+            sdmmc_card_t* card = nullptr;
+            err = power_on();
+            if (err == ESP_OK)
+            {
+                err = esp_vfs_fat_sdmmc_mount(k_mount_point, &host, &slot, &mcfg, &card);
+            }
+            if (err == ESP_OK)
+            {
+                s_card = card;
+            }
+        }
+        s_fmt_ms = (esp_timer_get_time() - t0) / 1000;
+        s_fmt_err = err;
+        if (err == ESP_OK)
+        {
+            run_self_test();
+        }
+        s_fmt_state.store(err == ESP_OK ? 2 : 3);
+        const std::string line = status_line();
+        printf("ROVER_SD_FORMAT %s ms=%" PRId64 " err=%s; %s\n", err == ESP_OK ? "ok" : "failed", s_fmt_ms,
+               esp_err_to_name(err), line.c_str());
+        fflush(stdout);
+    }).detach();
+    const esp_pthread_cfg_t restore = had_prev ? prev : esp_pthread_get_default_config();
+    esp_pthread_set_cfg(&restore);
+    return 0;
+}
+
+std::string format_line()
+{
+    char out[64];
+    switch (s_fmt_state.load())
+    {
+    case 1:
+        return "running";
+    case 2:
+        snprintf(out, sizeof(out), "ok ms=%" PRId64, s_fmt_ms);
+        return out;
+    case 3:
+        snprintf(out, sizeof(out), "failed err=%s", esp_err_to_name(s_fmt_err));
+        return out;
+    default:
+        return "idle";
+    }
+}
+
 bool mounted()
 {
     return s_card != nullptr;
@@ -238,6 +342,10 @@ esp_err_t usage(uint64_t* total_bytes, uint64_t* free_bytes)
 
 std::string status_line()
 {
+    if (s_fmt_state.load() == 1)
+    {
+        return "formatting";
+    }
     char out[256];
     if (!s_card)
     {

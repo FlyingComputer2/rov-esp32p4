@@ -524,6 +524,23 @@ void start_applets()
         printf("ROVER_UDPFS_EXIT rc=1\n");
     }
     sys.add_query("udpfs", [] { return files.stats_line(); });
+
+    /* `set sys sd_format erase`: formats the TF card FAT32 in place, losing
+     * everything on it (`get sys sd_format` / `get sys sd` follow it). Refused
+     * while a recording runs or udpfs has files open; the word "erase" is
+     * the confirmation. */
+    sys.add_query("sd_format", [] { return rover_sd::format_line(); });
+    sys.add_control("sd_format", [](const std::string& v) {
+        if (v != "erase")
+        {
+            return -EINVAL;
+        }
+        if (g_video_record.load() || files.open_handles() > 0)
+        {
+            return -EBUSY;
+        }
+        return rover_sd::format_card();
+    });
     if (!sys.configure(sy) || !sys.start())
     {
         printf("ROVER_SYS_EXIT rc=1\n");

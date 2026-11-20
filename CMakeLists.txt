@@ -44,13 +44,13 @@ FetchContent_Declare(krono
 # upstream 10). It uses this firmware's bfc and pins none.
 FetchContent_Declare(sys_applet
     GIT_REPOSITORY https://github.com/FlyingComputer2/sys-applet-esp32p4.git
-    GIT_TAG 00c16e1fe60f359a7f25eb68839de60d2fa16f65
+    GIT_TAG 0c34abc0b6b11ed8a1387e50ae376d71de89033d
 )
 # Remote file access (udpfs: upstream 11, UDP 2440). It uses this firmware's
 # bfc and pins none; udpfs_config/ is this firmware's errno / flag map.
 FetchContent_Declare(udpfs
     GIT_REPOSITORY https://github.com/FlyingComputer2/udpfs.git
-    GIT_TAG 55c1cec75ab9780910d1fe3ff34665562e6941fd
+    GIT_TAG efb54f620e58569108664d67872a308c81ca9530
 )
 set(UDPFS_CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/udpfs_config)
 foreach(dep winject_l3 winject_sdio_proxy vstreamer krono sys_applet udpfs)

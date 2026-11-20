@@ -22,18 +22,32 @@ namespace rover_sd
 constexpr const char* k_mount_point = "/sdcard";
 
 /**
- * Powers the card and mounts it at /sdcard. A card that does not mount (no
- * FAT volume; exFAT is not built in, so an exFAT card counts) is partitioned
- * and formatted FAT32, one partition: its contents are lost. Call after winject_proxy_start(), which
- * brings up the SDMMC host. Then runs a 1 MB write / read-back self-test
- * (a temporary file, removed). Prints ROVER_SD ... or ROVER_SD_FAILED ....
+ * Powers the card and mounts it at /sdcard (3 attempts, the card power-cycled
+ * in between; the retries at 20 MHz). Never formats: a card without FAT
+ * (exFAT is not built in) stays unmounted until format_card(). Call after
+ * winject_proxy_start(), which brings up the SDMMC host. Then runs a 1 MB
+ * write / read-back self-test (a temporary file, removed). Prints ROVER_SD ...
+ * or ROVER_SD_FAILED ....
  */
 esp_err_t mount();
 
 /**
+ * Starts formatting the card FAT32 (one partition, 64 KB clusters) on a
+ * thread of its own: everything on it is lost. A mounted card is formatted in
+ * place; an unmounted one (no FAT) is mounted with formatting allowed. The
+ * caller makes sure nothing has files open on /sdcard. 0, or -EALREADY while a
+ * format runs. format_line() reports it; the self-test runs again after.
+ */
+int format_card();
+
+/** `get sys sd_format`: "idle", "running", "ok ms=<n>" or "failed err=<name>". */
+std::string format_line();
+
+/**
  * One line for `get sys sd`: "mounted=1 name=... card_mb=... fs_mb=...
- * free_mb=... freq_khz=... width=... test=ok write_kbps=... read_kbps=..."
- * or "mounted=0 stage=power|mount err=<esp_err name>".
+ * free_mb=... freq_khz=... width=... test=ok write_kbps=... read_kbps=...
+ * attempts=...", "mounted=0 stage=power|mount err=<esp_err name> attempts=...",
+ * or "formatting" while a format runs.
  */
 std::string status_line();
 
