@@ -23,20 +23,28 @@ constexpr const char* k_mount_point = "/sdcard";
 
 /**
  * Powers the card and mounts it at /sdcard (3 attempts, the card power-cycled
- * in between; the retries at 20 MHz). Never formats: a card without FAT
- * (exFAT is not built in) stays unmounted until format_card(). Call after
- * winject_proxy_start(), which brings up the SDMMC host. Then runs a 1 MB
- * write / read-back self-test (a temporary file, removed). Prints ROVER_SD ...
+ * in between with its lines held low; the retries at 20 MHz). Never formats: a
+ * card without FAT (exFAT is not built in) stays unmounted until
+ * format_card(). Writes nothing. Registers a shutdown handler that unmounts
+ * and powers the card down before a software restart. Call after
+ * winject_proxy_start(), which brings up the SDMMC host. Prints ROVER_SD ...
  * or ROVER_SD_FAILED ....
  */
 esp_err_t mount();
+
+/**
+ * Starts the 1 MB write / read-back test (/sdcard/sys/sdtest.tmp, removed) on
+ * a thread of its own; `get sys sd` shows test=, write_kbps= and read_kbps=
+ * after. 0, -ENODEV (not mounted) or -EALREADY.
+ */
+int run_test();
 
 /**
  * Starts formatting the card FAT32 (one partition, 64 KB clusters) on a
  * thread of its own: everything on it is lost. A mounted card is formatted in
  * place; an unmounted one (no FAT) is mounted with formatting allowed. The
  * caller makes sure nothing has files open on /sdcard. 0, or -EALREADY while a
- * format runs. format_line() reports it; the self-test runs again after.
+ * format runs. format_line() reports it.
  */
 int format_card();
 
@@ -47,7 +55,8 @@ std::string format_line();
  * One line for `get sys sd`: "mounted=1 name=... card_mb=... fs_mb=...
  * free_mb=... freq_khz=... width=... test=ok write_kbps=... read_kbps=...
  * attempts=...", "mounted=0 stage=power|mount err=<esp_err name> attempts=...",
- * or "formatting" while a format runs.
+ * "formatting" while a format runs or "testing" while run_test() does. test=
+ * is "none" until a test ran.
  */
 std::string status_line();
 

@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -14,6 +15,8 @@
 #include "esp_heap_caps.h"
 #include "esp_ldo_regulator.h"
 #include "esp_pthread.h"
+#include "esp_rom_sys.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
@@ -37,7 +40,17 @@ constexpr int k_io_ldo_mv = 3300;
  * card's init failed with ESP_ERR_INVALID_CRC at 40 MHz on every attempt). */
 constexpr int k_mount_attempts = 3;
 
-constexpr const char* k_test_path = "/sdcard/sdtest.tmp";
+/* The card's lines (slot 0 IO MUX): D0-D3, CLK, CMD. */
+constexpr gpio_num_t k_card_lines[] = {GPIO_NUM_39, GPIO_NUM_40, GPIO_NUM_41,
+                                       GPIO_NUM_42, GPIO_NUM_43, GPIO_NUM_44};
+
+/* The write test runs only on request (`set sys sd_test run`), in its own
+ * directory: a boot writes nothing, and the root directory is only written when
+ * a top-level entry is created. The root directory was the one structure found
+ * corrupted after the board lost power during card writes, and the boot test
+ * used to create and delete a file in it on every boot. */
+constexpr const char* k_test_dir = "/sdcard/sys";
+constexpr const char* k_test_path = "/sdcard/sys/sdtest.tmp";
 constexpr size_t k_test_chunk = 64 * 1024;
 constexpr size_t k_test_bytes = 1024 * 1024;
 
@@ -46,6 +59,9 @@ int s_attempts = 0;
 
 /* format_card(): 0 idle, 1 running, 2 ok, 3 failed. */
 std::atomic<int> s_fmt_state {0};
+/* run_test(): true while it runs. */
+std::atomic<bool> s_test_running {false};
+bool s_shutdown_registered = false;
 esp_err_t s_fmt_err = ESP_OK;
 int64_t s_fmt_ms = 0;
 
@@ -85,7 +101,7 @@ esp_err_t s_fail_err = ESP_ERR_INVALID_STATE;
 struct self_test
 {
     bool ran = false;
-    const char* result = "skipped";
+    const char* result = "none"; /* not run since boot (`set sys sd_test run`) */
     uint32_t write_kbps = 0;
     uint32_t read_kbps = 0;
 } s_test;
@@ -113,13 +129,64 @@ esp_err_t power_on()
     return ESP_OK;
 }
 
-/* Card power off long enough to reset it, then on again. */
+/* The card's lines as GPIOs: driven low (no pull) or released (input, no
+ * pull). While the card is unpowered its lines must not be high: the slot's
+ * internal pull-ups and the host's CLK / CMD drivers are on the 3.3 V IO
+ * supply (LDO_VO4, which stays on for the C6), and they back-power the card
+ * through its pins, so it never resets. Slot 0 must not be initialised (the
+ * next mount puts the pins back on the IO MUX). */
+void card_lines(bool low)
+{
+    uint64_t mask = 0;
+    for (gpio_num_t g : k_card_lines)
+    {
+        mask |= 1ULL << g;
+    }
+    gpio_config_t io = {};
+    io.pin_bit_mask = mask;
+    io.mode = low ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT;
+    io.pull_up_en = GPIO_PULLUP_DISABLE;
+    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&io);
+    if (low)
+    {
+        for (gpio_num_t g : k_card_lines)
+        {
+            gpio_set_level(g, 0);
+        }
+    }
+}
+
+void power_off()
+{
+    card_lines(true);
+    gpio_set_level(k_power_gpio, !k_power_on_level);
+}
+
+/* Card power off long enough to reset it (lines low, see card_lines), then on
+ * again with the lines released. */
 void power_cycle()
 {
-    gpio_set_level(k_power_gpio, !k_power_on_level);
-    vTaskDelay(pdMS_TO_TICKS(200));
+    power_off();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    card_lines(false);
     gpio_set_level(k_power_gpio, k_power_on_level);
     vTaskDelay(pdMS_TO_TICKS(20));
+}
+
+/* Before a software restart (OTA, udp_ota reboot): unmount, so FAT is
+ * consistent and the card idle, then power it down cleanly instead of with the
+ * reset. Panics do not run shutdown handlers. An open file (a recording) loses
+ * what was not yet closed; the volume stays consistent. */
+void shutdown_card()
+{
+    if (s_card)
+    {
+        esp_vfs_fat_sdcard_unmount(k_mount_point, s_card);
+        s_card = nullptr;
+    }
+    power_off();
+    esp_rom_delay_us(10 * 1000);
 }
 
 uint32_t kbps(size_t bytes, int64_t us)
@@ -146,6 +213,7 @@ void run_self_test()
     }
 
     s_test.result = "write_failed";
+    mkdir(k_test_dir, 0777);
     FILE* f = fopen(k_test_path, "wb");
     if (f)
     {
@@ -240,7 +308,10 @@ esp_err_t mount()
         return err;
     }
     s_card = card;
-    run_self_test();
+    if (!s_shutdown_registered)
+    {
+        s_shutdown_registered = esp_register_shutdown_handler(shutdown_card) == ESP_OK;
+    }
     const std::string line = status_line();
     printf("ROVER_SD %s\n", line.c_str());
     fflush(stdout);
@@ -293,14 +364,40 @@ int format_card()
         }
         s_fmt_ms = (esp_timer_get_time() - t0) / 1000;
         s_fmt_err = err;
-        if (err == ESP_OK)
-        {
-            run_self_test();
-        }
         s_fmt_state.store(err == ESP_OK ? 2 : 3);
         const std::string line = status_line();
         printf("ROVER_SD_FORMAT %s ms=%" PRId64 " err=%s; %s\n", err == ESP_OK ? "ok" : "failed", s_fmt_ms,
                esp_err_to_name(err), line.c_str());
+        fflush(stdout);
+    }).detach();
+    const esp_pthread_cfg_t restore = had_prev ? prev : esp_pthread_get_default_config();
+    esp_pthread_set_cfg(&restore);
+    return 0;
+}
+
+int run_test()
+{
+    if (!s_card)
+    {
+        return -ENODEV;
+    }
+    if (s_fmt_state.load() == 1 || s_test_running.exchange(true))
+    {
+        return -EALREADY;
+    }
+    esp_pthread_cfg_t tc = esp_pthread_get_default_config();
+    esp_pthread_cfg_t prev {};
+    const bool had_prev = esp_pthread_get_cfg(&prev) == ESP_OK;
+    tc.thread_name = "sd_test";
+    tc.stack_size = 6 * 1024;
+    tc.prio = 4;
+    tc.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT; /* SDMMC: the cache stays on */
+    esp_pthread_set_cfg(&tc);
+    std::thread([] {
+        run_self_test();
+        s_test_running.store(false);
+        const std::string line = status_line();
+        printf("ROVER_SD_TEST %s\n", line.c_str());
         fflush(stdout);
     }).detach();
     const esp_pthread_cfg_t restore = had_prev ? prev : esp_pthread_get_default_config();
@@ -345,6 +442,10 @@ std::string status_line()
     if (s_fmt_state.load() == 1)
     {
         return "formatting";
+    }
+    if (s_test_running.load())
+    {
+        return "testing";
     }
     char out[256];
     if (!s_card)

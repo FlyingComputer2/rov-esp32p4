@@ -530,6 +530,11 @@ void start_applets()
      * while a recording runs or udpfs has files open; the word "erase" is
      * the confirmation. */
     sys.add_query("sd_format", [] { return rover_sd::format_line(); });
+    /* `set sys sd_test run`: the 1 MB write / read-back test (in /sdcard/sys);
+     * a boot writes nothing to the card. Results in `get sys sd`. */
+    sys.add_control("sd_test", [](const std::string& v) {
+        return v == "run" ? rover_sd::run_test() : -EINVAL;
+    });
     sys.add_control("sd_format", [](const std::string& v) {
         if (v != "erase")
         {
