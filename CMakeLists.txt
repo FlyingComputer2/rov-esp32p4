@@ -33,7 +33,7 @@ FetchContent_Declare(winject_sdio_proxy
 # vstreamer sends the video; FEC is winject-l3's (winject-fec, below).
 FetchContent_Declare(vstreamer
     GIT_REPOSITORY https://github.com/FlyingComputer2/vstreamer.git
-    GIT_TAG 07ef91818a25afeb5d83a1a27215e14a7c96b294
+    GIT_TAG 34a689b1a805356c699c1dcab7633a05b3653481
 )
 # Clock sync (rover = SynchClient on L3 upstream 0).
 FetchContent_Declare(krono
@@ -44,7 +44,7 @@ FetchContent_Declare(krono
 # upstream 10). It uses this firmware's bfc and pins none.
 FetchContent_Declare(sys_applet
     GIT_REPOSITORY https://github.com/FlyingComputer2/sys-applet-esp32p4.git
-    GIT_TAG 0c34abc0b6b11ed8a1387e50ae376d71de89033d
+    GIT_TAG 0273c8de45ff37668631f12dcccf2a24aaa19ec6
 )
 # Remote file access (udpfs: upstream 11, UDP 2440). It uses this firmware's
 # bfc and pins none; udpfs_config/ is this firmware's errno / flag map.
