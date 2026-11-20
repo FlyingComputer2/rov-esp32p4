@@ -50,7 +50,7 @@ FetchContent_Declare(sys_applet
 # bfc and pins none; udpfs_config/ is this firmware's errno / flag map.
 FetchContent_Declare(udpfs
     GIT_REPOSITORY https://github.com/FlyingComputer2/udpfs.git
-    GIT_TAG efb54f620e58569108664d67872a308c81ca9530
+    GIT_TAG f755977a1400ecd9a7e59266f990ddd7b9299e3e
 )
 set(UDPFS_CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/udpfs_config)
 foreach(dep winject_l3 winject_sdio_proxy vstreamer krono sys_applet udpfs)
