@@ -27,11 +27,17 @@ constexpr int k_power_on_level = 0;
 constexpr int k_io_ldo_chan = 4;
 constexpr int k_io_ldo_mv = 3300;
 
+/* Mount attempts; the card is power-cycled between them, and the retries run
+ * at the default 20 MHz instead of 40 MHz high speed (after a power cycle the
+ * card's init failed with ESP_ERR_INVALID_CRC at 40 MHz on every attempt). */
+constexpr int k_mount_attempts = 3;
+
 constexpr const char* k_test_path = "/sdcard/sdtest.tmp";
 constexpr size_t k_test_chunk = 64 * 1024;
 constexpr size_t k_test_bytes = 1024 * 1024;
 
 sdmmc_card_t* s_card = nullptr;
+int s_attempts = 0;
 esp_ldo_channel_handle_t s_ldo = nullptr;
 
 /* Written once by mount() (app_main), read by status_line() afterwards. */
@@ -66,6 +72,15 @@ esp_err_t power_on()
     /* Card VDD ramp before the first command. */
     vTaskDelay(pdMS_TO_TICKS(20));
     return ESP_OK;
+}
+
+/* Card power off long enough to reset it, then on again. */
+void power_cycle()
+{
+    gpio_set_level(k_power_gpio, !k_power_on_level);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    gpio_set_level(k_power_gpio, k_power_on_level);
+    vTaskDelay(pdMS_TO_TICKS(20));
 }
 
 uint32_t kbps(size_t bytes, int64_t us)
@@ -167,13 +182,30 @@ esp_err_t mount()
     slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
     esp_vfs_fat_sdmmc_mount_config_t mcfg = {};
-    mcfg.format_if_mount_failed = true;
+    /* Never format: the card holds recordings and photos, and a glitch that
+     * looks like a missing filesystem must not erase them. A new card is
+     * formatted FAT32 on a PC (exFAT is not built in). */
+    mcfg.format_if_mount_failed = false;
     /* The MKV recorder, a photo and udpfs (up to 4 handles) at once. */
     mcfg.max_files = 8;
     mcfg.allocation_unit_size = 64 * 1024;
 
     sdmmc_card_t* card = nullptr;
-    err = esp_vfs_fat_sdmmc_mount(k_mount_point, &host, &slot, &mcfg, &card);
+    for (s_attempts = 1; s_attempts <= k_mount_attempts; ++s_attempts)
+    {
+        host.max_freq_khz = s_attempts == 1 ? SDMMC_FREQ_HIGHSPEED : SDMMC_FREQ_DEFAULT;
+        err = esp_vfs_fat_sdmmc_mount(k_mount_point, &host, &slot, &mcfg, &card);
+        if (err == ESP_OK)
+        {
+            break;
+        }
+        printf("ROVER_SD_RETRY attempt=%d freq_khz=%d err=%s\n", s_attempts, host.max_freq_khz,
+               esp_err_to_name(err));
+        if (s_attempts < k_mount_attempts)
+        {
+            power_cycle();
+        }
+    }
     if (err != ESP_OK)
     {
         s_fail_stage = "mount";
@@ -209,8 +241,8 @@ std::string status_line()
     char out[256];
     if (!s_card)
     {
-        snprintf(out, sizeof(out), "mounted=0 stage=%s err=%s", s_fail_stage,
-                 esp_err_to_name(s_fail_err));
+        snprintf(out, sizeof(out), "mounted=0 stage=%s err=%s attempts=%d", s_fail_stage,
+                 esp_err_to_name(s_fail_err), s_attempts > k_mount_attempts ? k_mount_attempts : s_attempts);
         return out;
     }
     uint64_t total = 0;
@@ -219,10 +251,10 @@ std::string status_line()
     const uint64_t card_bytes = (uint64_t)s_card->csd.capacity * s_card->csd.sector_size;
     snprintf(out, sizeof(out),
              "mounted=1 path=%s name=%s card_mb=%" PRIu64 " fs_mb=%" PRIu64 " free_mb=%" PRIu64
-             " freq_khz=%d width=%d test=%s write_kbps=%" PRIu32 " read_kbps=%" PRIu32,
+             " freq_khz=%d width=%d test=%s write_kbps=%" PRIu32 " read_kbps=%" PRIu32 " attempts=%d",
              k_mount_point, s_card->cid.name, card_bytes >> 20, total >> 20, free_bytes >> 20,
              s_card->real_freq_khz, 1 << s_card->log_bus_width, s_test.result, s_test.write_kbps,
-             s_test.read_kbps);
+             s_test.read_kbps, s_attempts);
     return out;
 }
 
