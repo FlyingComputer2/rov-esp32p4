@@ -674,15 +674,19 @@ void app::handle_frame(const msp::frame& f)
             auto rc = unpack_rc(f.payload);
             if (rc)
             {
-                bool photo_pressed;
+                rc_events ev;
                 {
                     std::lock_guard<std::mutex> lock(mu_);
                     link_.accept(*rc, esp_timer_get_time(), realtime_us32(),
-                                 static_cast<uint32_t>(p_.get(p_failsafe_ms)), &photo_pressed);
+                                 static_cast<uint32_t>(p_.get(p_failsafe_ms)), &ev);
                 }
-                if (photo_pressed && cfg_.request_photo)
+                if (ev.photo && cfg_.request_photo)
                 {
                     cfg_.request_photo();
+                }
+                if (ev.record != 0 && cfg_.request_record)
+                {
+                    cfg_.request_record(ev.record > 0);
                 }
             }
             return;

@@ -391,12 +391,12 @@ void test_camera_trigger()
     rc_link link;
     rc_frame f;
     f.src = k_src_phone;
-    bool pressed = false;
+    rc_events ev;
     auto receive = [&](uint16_t seq, int ms, uint8_t flags) {
         f.seq = seq;
         f.flags = flags;
-        link.accept(f, ms * 1000, 0, 300, &pressed);
-        return pressed;
+        link.accept(f, ms * 1000, 0, 300, &ev);
+        return ev.photo;
     };
     CHECK(!receive(0, 0, k_rc_flag_photo));
     CHECK(!receive(1, 20, 0));
@@ -410,6 +410,30 @@ void test_camera_trigger()
     CHECK(!receive(0, 440, k_rc_flag_photo)); // timeout
     CHECK(!receive(1, 460, k_rc_flag_binary));
     CHECK(receive(2, 480, k_rc_flag_photo | k_rc_flag_binary));
+}
+
+void test_record_switch()
+{
+    rc_link link;
+    rc_frame f;
+    f.src = k_src_phone;
+    rc_events ev;
+    auto receive = [&](uint16_t seq, int ms, uint8_t flags) {
+        f.seq = seq;
+        f.flags = flags;
+        link.accept(f, ms * 1000, 0, 300, &ev);
+        return ev.record;
+    };
+    CHECK(receive(0, 0, k_rc_flag_record) == 0);  // first frame: position only
+    CHECK(receive(1, 20, k_rc_flag_record) == 0);
+    CHECK(receive(2, 40, 0) == -1);
+    CHECK(receive(2, 45, k_rc_flag_record) == 0);  // duplicate
+    CHECK(receive(3, 60, 0) == 0);
+    CHECK(receive(4, 80, k_rc_flag_record | k_rc_flag_photo) == 1);
+    CHECK(ev.photo);
+    CHECK(receive(5, 100, k_rc_flag_record) == 0);
+    CHECK(receive(0, 440, 0) == 0);  // after a timeout: position only, no stop
+    CHECK(receive(1, 460, k_rc_flag_record) == 1);
 }
 
 void test_gyro_cal_and_ahrs()
@@ -468,6 +492,7 @@ int main()
     test_rate_loop();
     test_rc_link();
     test_camera_trigger();
+    test_record_switch();
     test_gyro_cal_and_ahrs();
     std::printf(g_failed ? "%d FAILED\n" : "all passed\n", g_failed);
     return g_failed ? 1 : 0;

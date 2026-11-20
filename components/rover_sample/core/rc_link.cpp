@@ -10,11 +10,11 @@ constexpr size_t k_lat_samples = 64;
 }
 
 bool rc_link::accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uint32_t failsafe_ms,
-                     bool* photo_pressed)
+                     rc_events* events)
 {
-    if (photo_pressed)
+    if (events)
     {
-        *photo_pressed = false;
+        *events = {};
     }
     if (have_ && rc.src != last_.src && now_us - last_us_ < int64_t(failsafe_ms) * 1000)
     {
@@ -32,10 +32,13 @@ bool rc_link::accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uin
             ++rejected_;  // duplicate or reordered
             return false;
         }
-        if (photo_pressed)
+        if (events)
         {
             const bool was_high = last_.flags & (k_rc_flag_photo | k_rc_flag_photo_held_in_cli);
-            *photo_pressed = !was_high && (rc.flags & k_rc_flag_photo);
+            events->photo = !was_high && (rc.flags & k_rc_flag_photo);
+            const bool rec_was = last_.flags & k_rc_flag_record;
+            const bool rec_now = rc.flags & k_rc_flag_record;
+            events->record = rec_now == rec_was ? 0 : rec_now ? 1 : -1;
         }
         win_span_ += d;
     }

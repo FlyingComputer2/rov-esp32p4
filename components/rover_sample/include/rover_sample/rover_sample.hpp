@@ -49,6 +49,7 @@ struct config
     std::string link_from_l3;
     pins pin;
     std::function<void()> request_photo;  // called on the apps reactor
+    std::function<void(bool on)> request_record;  // CH11 edges, on the apps reactor
     // The reactor (bfc::default_reactor_registry) the RC link and the console
     // run on; start() registers on it before its thread runs.
     std::string reactor;

@@ -35,6 +35,7 @@ enum : uint8_t
     k_rc_flag_photo = 0x02,
     k_rc_flag_binary = 0x04,
     k_rc_flag_photo_held_in_cli = 0x08,
+    k_rc_flag_record = 0x10,
 };
 
 // No mode override in an RC frame: the rover uses its `mode` parameter.

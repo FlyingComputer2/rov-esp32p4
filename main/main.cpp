@@ -24,6 +24,7 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include "lwip/sockets.h"
 
@@ -469,6 +470,27 @@ void start_rssi_poll(const winject::L3& l3)
         .detach();
 }
 
+/* One line to this board's vstreamer m-plane (UDP 5090), for the RC switches
+ * (CH9 photo, CH11 record). vstreamer handles the datagram on the shared apps
+ * reactor after the caller returns; its reply goes nowhere. */
+void send_video_command(const char* command)
+{
+    sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    dst.sin_port = htons(k_video_mplane_port);
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0 || sendto(fd, command, strlen(command), MSG_DONTWAIT,
+                         reinterpret_cast<const sockaddr*>(&dst), sizeof(dst)) < 0)
+    {
+        ESP_LOGW(TAG, "could not send \"%s\" to vstreamer", command);
+    }
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+}
+
 void start_applets()
 {
     static applets::BwtestApplet bwtest;
@@ -563,24 +585,8 @@ void start_applets()
     rs.link_to_l3 = k_rc_up.names.to_l3;
     rs.link_from_l3 = k_rc_up.names.from_l3;
     rs.console = k_rover_sample_console;
-    rs.request_photo = [] {
-        // vstreamer handles this datagram on the shared apps reactor after we return.
-        constexpr char command[] = "set photo take 1";
-        sockaddr_in dst = {};
-        dst.sin_family = AF_INET;
-        dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        dst.sin_port = htons(k_video_mplane_port);
-        const int fd = socket(AF_INET, SOCK_DGRAM, 0);
-        if (fd < 0 || sendto(fd, command, sizeof(command) - 1, MSG_DONTWAIT,
-                             reinterpret_cast<const sockaddr*>(&dst), sizeof(dst)) < 0)
-        {
-            ESP_LOGW(TAG, "could not send camera trigger");
-        }
-        if (fd >= 0)
-        {
-            close(fd);
-        }
-    };
+    rs.request_photo = [] { send_video_command("set photo take 1"); };
+    rs.request_record = [](bool on) { send_video_command(on ? "set rec on 1" : "set rec on 0"); };
     rs.pin = rover_board::actuator_pins();
     rs.pin.i2c_port = k_board_i2c_port;
     if (!car.configure(rs) || !car.start())
