@@ -386,6 +386,32 @@ void test_rc_link()
     CHECK(l.accept(restart, now + 820000, rt, 300));
 }
 
+void test_camera_trigger()
+{
+    rc_link link;
+    rc_frame f;
+    f.src = k_src_phone;
+    bool pressed = false;
+    auto receive = [&](uint16_t seq, int ms, uint8_t flags) {
+        f.seq = seq;
+        f.flags = flags;
+        link.accept(f, ms * 1000, 0, 300, &pressed);
+        return pressed;
+    };
+    CHECK(!receive(0, 0, k_rc_flag_photo));
+    CHECK(!receive(1, 20, 0));
+    CHECK(receive(2, 40, k_rc_flag_photo));
+    CHECK(!receive(2, 45, 0)); // duplicate cannot release
+    CHECK(!receive(3, 60, k_rc_flag_photo));
+    CHECK(!receive(4, 80, 0));
+    CHECK(!receive(5, 100, k_rc_flag_photo_held_in_cli));
+    CHECK(!receive(6, 120, k_rc_flag_photo));
+    CHECK(!receive(7, 140, 0));
+    CHECK(!receive(0, 440, k_rc_flag_photo)); // timeout
+    CHECK(!receive(1, 460, k_rc_flag_binary));
+    CHECK(receive(2, 480, k_rc_flag_photo | k_rc_flag_binary));
+}
+
 void test_gyro_cal_and_ahrs()
 {
     gyro_cal g;
@@ -441,6 +467,7 @@ int main()
     test_throttle_min();
     test_rate_loop();
     test_rc_link();
+    test_camera_trigger();
     test_gyro_cal_and_ahrs();
     std::printf(g_failed ? "%d FAILED\n" : "all passed\n", g_failed);
     return g_failed ? 1 : 0;

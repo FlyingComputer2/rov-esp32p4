@@ -18,7 +18,8 @@ class rc_link
    public:
     // now_us: monotonic; now_rt_us: CLOCK_REALTIME low 32 bits. False when
     // the frame is from a source the rover is not following.
-    bool accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uint32_t failsafe_ms);
+    bool accept(const rc_frame& rc, int64_t now_us, uint32_t now_rt_us, uint32_t failsafe_ms,
+                bool* photo_pressed = nullptr);
     // Closes the statistics window once a second.
     void tick(int64_t now_us);
 

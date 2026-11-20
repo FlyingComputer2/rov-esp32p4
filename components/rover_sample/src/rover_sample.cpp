@@ -24,6 +24,7 @@
 #include <bfc/shared_sized_buffer.hpp>
 #include "controller.hpp"
 #include "drivers.hpp"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_pthread.h"
@@ -267,6 +268,24 @@ bool app::start()
     {
         return false;
     }
+    if (cfg_.pin.binary_out >= 0)
+    {
+        if (cfg_.pin.binary_out >= GPIO_NUM_MAX || !GPIO_IS_VALID_OUTPUT_GPIO(cfg_.pin.binary_out))
+        {
+            ESP_LOGE(TAG, "invalid binary output GPIO%d", cfg_.pin.binary_out);
+            return false;
+        }
+        const auto pin = static_cast<gpio_num_t>(cfg_.pin.binary_out);
+        gpio_config_t io = {};
+        io.pin_bit_mask = 1ULL << pin;
+        io.mode = GPIO_MODE_OUTPUT;
+        io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        if (gpio_set_level(pin, 0) != ESP_OK || gpio_config(&io) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "binary output init failed on GPIO%d", cfg_.pin.binary_out);
+            return false;
+        }
+    }
     /* Internal RAM is short with 1080p live TX running: with rover_sample's
      * stacks internal (20 KB left) live TX fell to ~20 fps, its sender and FEC
      * ~5x slower; on PSRAM stacks it runs at 29 fps as without rover_sample.
@@ -367,6 +386,7 @@ void app::control_task()
         // Snapshot of everything other threads write.
         control_input in;
         float override_us[3];
+        bool binary_high;
         float aux_norm = 0;
         float aux2_norm = 0;
         {
@@ -395,6 +415,7 @@ void app::control_task()
             in.rc_ever = link_.ever();
             in.rc_valid = link_.ever() && now - link_.last_us() < int64_t(fs_ms) * 1000;
             const rc_frame& rc = link_.last();
+            binary_high = in.rc_valid && (rc.flags & k_rc_flag_binary);
             in.steer = rc.steer / 1000.f;
             in.thr = rc.thr / 1000.f;
             in.arm = rc.flags & k_rc_flag_arm;
@@ -405,6 +426,10 @@ void app::control_task()
             {
                 override_us[ch] = servo_override_us_[ch];
             }
+        }
+        if (cfg_.pin.binary_out >= 0)
+        {
+            gpio_set_level(static_cast<gpio_num_t>(cfg_.pin.binary_out), binary_high);
         }
         in.dt = dt;
 
@@ -649,9 +674,16 @@ void app::handle_frame(const msp::frame& f)
             auto rc = unpack_rc(f.payload);
             if (rc)
             {
-                std::lock_guard<std::mutex> lock(mu_);
-                link_.accept(*rc, esp_timer_get_time(), realtime_us32(),
-                             static_cast<uint32_t>(p_.get(p_failsafe_ms)));
+                bool photo_pressed;
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    link_.accept(*rc, esp_timer_get_time(), realtime_us32(),
+                                 static_cast<uint32_t>(p_.get(p_failsafe_ms)), &photo_pressed);
+                }
+                if (photo_pressed && cfg_.request_photo)
+                {
+                    cfg_.request_photo();
+                }
             }
             return;
         }
