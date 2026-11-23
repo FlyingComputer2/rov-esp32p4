@@ -28,7 +28,7 @@ FetchContent_Declare(winject_l3
 )
 FetchContent_Declare(winject_sdio_proxy
     GIT_REPOSITORY https://github.com/winject-wireless/winject-radio-esp32-sdio-proxy.git
-    GIT_TAG e625385fd5034d56551b137d5622373ecee54dd6
+    GIT_TAG 8bd9524dcf310a8c70359d36ac47233c4c95a932
 )
 # vstreamer sends the video; FEC is winject-l3's (winject-fec, below).
 FetchContent_Declare(vstreamer
